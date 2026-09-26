@@ -14,13 +14,28 @@ import { listPresets, findPreset, saveCustomPreset, removeCustomPreset } from '.
 import { listStore, clearStore, runGarbageCollection, getRegisteredProjects } from './store.js';
 import { scaffoldProject } from './scaffolder.js';
 import { runDoctor, printDoctorResults } from './diagnostics/doctor.js';
+import { checkOutdated, printOutdatedTable } from './diagnostics/outdated.js';
+import { runSecurityAudit, printAuditResults } from './diagnostics/audit.js';
 import { DependencyResolver } from './resolver/index.js';
 import { runScript, execBin, runDlx } from './scripts/index.js';
 import { findWorkspaceRoot, discoverWorkspacePackages, linkWorkspaceDependencies, runWorkspaceScript } from './workspaces/index.js';
+import { LinkPMError } from './utils/errors.js';
 
 const cli = cac('linkpm');
 
 ensureDirectories();
+
+process.on('unhandledRejection', (err: any) => {
+  if (err instanceof LinkPMError) {
+    console.error(`\n${pc.bold(pc.red('✖ Error'))} [${pc.dim(err.code)}]: ${err.message}`);
+    if (err.hint) {
+      console.error(`  ${pc.cyan('💡 Hint:')} ${err.hint}\n`);
+    }
+    process.exit(1);
+  }
+  console.error(`\n${pc.bold(pc.red('✖ Fatal error:'))} ${err?.message || err}\n`);
+  process.exit(1);
+});
 
 // 0. CREATE / SCAFFOLD COMMAND
 cli
@@ -508,6 +523,25 @@ cli
     }
 
     console.log(pc.yellow(`Unknown workspace action "${action}". Available: list, link.`));
+  });
+
+// 19. OUTDATED COMMAND
+cli
+  .command('outdated', 'Check for newer versions of dependencies')
+  .action(async () => {
+    const projectRoot = findProjectRoot();
+    console.log(pc.dim('Checking for outdated dependencies...'));
+    const outdated = await checkOutdated(projectRoot);
+    printOutdatedTable(outdated);
+  });
+
+// 20. AUDIT COMMAND
+cli
+  .command('audit', 'Run security audit on installed dependencies')
+  .action(async () => {
+    const projectRoot = findProjectRoot();
+    const result = await runSecurityAudit(projectRoot);
+    printAuditResults(result);
   });
 
 cli.help();

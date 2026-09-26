@@ -1,181 +1,234 @@
 # ⚡ linkpm
 
-> **Lightning-fast NPM package manager with a central store, directory links, and stack presets.**
+> **Next-generation, production-grade JavaScript & TypeScript package manager with global zero-copy store, deterministic DAG resolution, stack presets, and monorepo workspace orchestration.**
 
-`linkpm` solves the two biggest frustrations with standard `npm`:
-1. **Speed & Disk Space**: Instead of downloading and duplicating gigabytes of `node_modules` across every project, `linkpm` caches packages **once** in a central store (`~/.linkpm/store`) and creates instant Windows Directory Junctions (or Unix symlinks) into your project in milliseconds.
-2. **Repetitive Typing**: Instead of typing the same 10-15 packages for every backend or frontend project, `linkpm` provides one-command **Presets** (`linkpm use frontend`, `linkpm use backend`) and lets you save your own custom bundles.
+[![npm version](https://img.shields.io/npm/v/linkpm.svg)](https://www.npmjs.com/package/linkpm)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18.0.0-green.svg)](https://nodejs.org/)
+
+---
+
+## 🚀 Why LinkPM?
+
+Traditional package managers force painful trade-offs: `npm` duplicates hundreds of megabytes of `node_modules` in every directory, `pnpm` can suffer from complex symlink resolution quirks, and setting up stacks repeatedly wastes developer time.
+
+`linkpm` delivers the best of all worlds:
+- **Global Zero-Copy Store**: Every package version is downloaded and verified **exactly once** in `~/.linkpm/store`. Subsequent installations in any project link in **sub-second time (5–25ms)**.
+- **Windows-First & Cross-Platform**: Uses native Windows NTFS Directory Junctions without requiring Administrator privileges, and standard symlinks on macOS and Linux.
+- **Deterministic DAG Engine**: Independent dependency resolver with topological cycle detection, peer dependency conflict engine, and strict SHA-512 integrity checks.
+- **Transactional Rollback**: Atomic directory linking guarantees `node_modules` is never left corrupted or half-installed if an operation fails.
+- **Monorepos & Workspaces**: Full support for `pnpm-workspace.yaml` and `package.json` workspaces, `workspace:*` inter-package links, and topological multi-package script runs.
+- **One-Command Presets**: Eliminate repetitive dependency typing with curated presets (`frontend`, `backend`, `fastify`, `ui`) and custom user-saved bundles.
+
+---
+
+## 📊 Feature Comparison Matrix
+
+| Feature | `npm` | `pnpm` | `yarn (v1)` | `bun` | `linkpm` |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Global Content Store** | ❌ | ✅ | ❌ | ✅ | ✅ |
+| **Zero-Copy Disk Linking** | ❌ | ✅ | ❌ | ✅ | ✅ |
+| **Windows NTFS Junctions (No Admin)** | ❌ | ⚠️ | ❌ | ⚠️ | ✅ **Native** |
+| **Transactional Rollback** | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Built-in Stack Presets** | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **One-Command Scaffolding** | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Monorepo Workspaces (`workspace:*`)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Topological Multi-Package Runner** | ❌ | ✅ | ⚠️ | ⚠️ | ✅ |
+| **On-the-Fly Execution (`dlx`)** | `npx` | `pnpm dlx` | ❌ | `bunx` | `linkpm dlx` |
+| **Store Garbage Collection (`gc`)** | ❌ | ✅ | ❌ | ❌ | ✅ |
+| **Dependency Tree & Trace (`why`)** | ⚠️ | ✅ | ✅ | ❌ | ✅ |
+| **Self-Healing Environment Doctor** | ❌ | ❌ | ❌ | ❌ | ✅ |
 
 ---
 
 ## 📦 Installation
 
-Install globally from npm:
-
 ```bash
 npm install -g linkpm
 ```
 
-Or run via npx:
+Verify your installation:
 ```bash
-npx linkpm --help
+linkpm doctor
 ```
 
 ---
 
-## 🚀 Quick Start
+## 🛠️ Complete CLI Command Reference
 
-### 1. Create a Complete Project in Seconds (Scaffolding + Instant Link)
-Instantly generate a full starter project with boilerplate code and all dependencies linked from your central cache:
+### 1. Installation & Package Management
 
 ```bash
-# ⚛️ Create a React + Vite + Tailwind frontend app with live UI:
-linkpm create frontend my-react-app
+# Install all dependencies from package.json
+linkpm install
+linkpm i
 
-# 🛠️ Create an Express + TypeScript API:
-linkpm create backend my-api
-
-# ⚡ Create a Fastify + TypeScript API:
-linkpm create fastify my-fastify-api
-```
-
-Then simply `cd <project>` and `npm run dev`!
-
----
-
-## 🛠️ Usage
-
-### 1. Adding & Removing Packages
-Add individual packages:
-```bash
+# Add dependencies
 linkpm add express cors dotenv
-```
-Save as `devDependencies` with `-D`:
-```bash
+
+# Add devDependencies
 linkpm add -D typescript @types/node tsx
-```
 
-Remove packages cleanly:
-```bash
-linkpm remove lodash axios
-# or
-linkpm rm express
-```
-
-### 2. Smart Offline-First Mode
-Install packages in **5-20 milliseconds** without touching the internet if they are in your central store:
-```bash
+# Fast offline-first installs (using local central store)
+linkpm add react --prefer-offline
 linkpm add react --offline
-# or prefer cached if available:
-linkpm add express --prefer-offline
-```
 
-### 3. Deterministic Lockfile & CI (`linkpm ci`)
-Every install automatically generates and updates `linkpm-lock.json` with SHA-512 checksums for secure, reproducible builds.
-
-In CI/CD environments or team deployments, run clean lockfile installs:
-```bash
+# Clean CI install from linkpm-lock.json
 linkpm ci
-```
 
-### 4. Updating Packages
-Refresh packages against the registry:
-```bash
+# Remove dependencies and clean node_modules links
+linkpm remove lodash axios
+linkpm rm express
+
+# Update dependencies against registry
 linkpm update
-# or update specific packages:
 linkpm update express vite
 ```
 
-### 5. Using Stack Presets (Instant Frontend & Backend Setup)
-Install complete, pre-configured stacks in a single command using `linkpm use`:
+### 2. Monorepos & Workspaces
+
+LinkPM natively recognizes `pnpm-workspace.yaml` and `package.json` `"workspaces"`:
 
 ```bash
-# Vite + React + Tailwind frontend stack
-linkpm use frontend
+# List all workspace packages in the monorepo
+linkpm workspace list
+linkpm w list
 
-# Standard Express + TypeScript backend stack
-linkpm use backend
+# Link inter-workspace dependencies (e.g., workspace:*) directly
+linkpm workspace link
 
-# Fastify + TypeScript backend stack
-linkpm use fastify
+# Run a script across all workspace packages in topological order
+linkpm run -r build
+linkpm run --recursive test
 
-# Tailwind + UI Icons pack
-linkpm use ui
+# Filter execution to specific packages
+linkpm run --filter @my-org/web-app build
+linkpm run --filter "*ui*" build
 ```
 
-*(You can also use `linkpm add -P <preset>` or `linkpm add "@frontend"`)*
-
-### 6. Creating Your Own Custom Presets
-Save your favorite library combinations once, use them everywhere:
+### 3. Lifecycle Scripts & Binary Execution
 
 ```bash
-# Save a custom preset with dependencies and devDependencies:
-linkpm preset save my-stack react react-dom lucide-react -d vite,tailwindcss,typescript --desc "My primary React stack"
+# Run any package.json script (with pre/post lifecycle hooks and .bin PATH injection)
+linkpm run build
+linkpm run test -- --watch
+linkpm run lint --if-present
 
-# Then in any project:
-linkpm add @my-stack
+# Direct script aliases
+linkpm test
+linkpm start
+
+# Run a binary installed in local node_modules/.bin context
+linkpm exec tsc --noEmit
+linkpm exec prettier --write .
+
+# Download and execute a remote package without installing (like npx / dlx)
+linkpm dlx cowsay "Hello from LinkPM!"
+linkpm dlx degit user/repo my-app
 ```
 
-List all available presets:
+### 4. Diagnostics, Security & Dependency Insights
+
 ```bash
-linkpm preset list
+# Validate Node.js version, NTFS junction capability, and store health
+linkpm doctor
+
+# Print Unicode ASCII dependency graph
+linkpm tree
+
+# Trace exact dependency paths explaining why a package is present
+linkpm why lodash
+
+# Check which installed packages have newer versions available
+linkpm outdated
+
+# Run vulnerability scan across installed dependencies
+linkpm audit
 ```
 
-Remove a custom preset:
-```bash
-linkpm preset remove my-stack
-```
+### 5. Managing Central Global Store
 
-### 7. Installing All Dependencies
-Just like `npm install`, links all dependencies declared in `package.json`:
 ```bash
-linkpm install
-# or
-linkpm i
-```
+# View central store location, unique packages, versions, and total disk size
+linkpm store status
 
-### 8. Managing the Central Store
-Check stored packages and disk space saved:
-```bash
+# List all stored packages and versions
 linkpm store list
+
+# Show store directory path
+linkpm store path
+
+# Garbage collect unreferenced packages from store (freeing disk space)
+linkpm store gc
+linkpm store gc --dry-run
+
+# Completely purge central store
+linkpm store clear
 ```
 
-Clear the central store:
+### 6. Stack Presets & Project Scaffolding
+
 ```bash
-linkpm store clear
+# Scaffold a full starter project with live UI and instant linked dependencies:
+linkpm create frontend my-react-app
+linkpm create backend my-api
+linkpm create fastify my-fastify-api
+
+# Apply a preset stack to an existing project:
+linkpm use frontend
+linkpm use backend
+linkpm use fastify
+linkpm use ui
+
+# Save your own custom team stack:
+linkpm preset save my-team-stack react react-dom -d vite,tailwindcss,typescript --desc "My team standard stack"
+
+# Apply custom preset in any project:
+linkpm add @my-team-stack
+
+# List available presets:
+linkpm preset list
 ```
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture & Security
 
 ```
                           [ npm Registry ]
                                  │
                    (downloads tarball once only)
-                                 ▼
-                   ┌─────────────────────────────┐
-                   │  Central Global Store       │
-                   │  ~/.linkpm/store/           │
-                   │  ├── express@4.19.2/        │
-                   │  ├── react@19.0.0/          │
-                   │  └── zod@3.23.8/            │
-                   └──────────────┬──────────────┘
+                   (streaming SHA-512 integrity check)
                                  │
-            Windows Directory Junctions / Unix Symlinks (0.001s)
-                ┌─────────────────┴─────────────────┐
-                ▼                                   ▼
-     [ Project 1: Backend ]              [ Project 2: Frontend ]
-     node_modules/                       node_modules/
-     ├── express ──► (points to store)   ├── react ──► (points to store)
-     └── zod     ──► (points to store)   └── .bin/ ──► (executable shims)
+                   ┌─────────────────────────────┐
+                   │   Central Global Store      │
+                   │   ~/.linkpm/store/          │
+                   │   ├── express@4.19.2/       │
+                   │   ├── react@19.0.0/         │
+                   │   └── zod@3.23.8/           │
+                   └─────────────────────────────┘
+                                 │
+         Cross-Process File Lock + Atomic Extraction
+         Zip-Slip Path Traversal Protection
+                                 │
+            Windows Directory Junctions / Unix Symlinks (5–20ms)
+                                 │
+         ┌───────────────────────┴───────────────────────┐
+         ▼                                               ▼
+   [ Project 1: Backend ]                      [ Project 2: Frontend ]
+   node_modules/                               node_modules/
+   ├── express ──► (points to store)           ├── react ──► (points to store)
+   ├── zod     ──► (points to store)           ├── .bin/ ──► (executable shims)
+   └── .bin/   ──► (executable shims)          └── ...
 ```
 
-- **Windows Directory Junctions**: Requires no Administrator privileges and works on any NTFS drive.
-- **Node Resolution & `.bin`**: Automatically generates `.cmd`, `.ps1`, and Unix shell executable shims inside `node_modules/.bin/` with `NODE_PATH` and `--preserve-symlinks` configured so all scripts (`npm run dev`, `npx`, etc.) run out of the box.
-- **Transitive Resolution**: Automatically resolves and isolates sub-dependencies per package in the central store.
+- **Cross-Process Concurrency Locks**: Uses PID and timestamp-backed file locking (`FileLock`) to prevent race conditions during simultaneous downloads or extractions.
+- **Zip-Slip Protection**: Tarball extraction explicitly validates archive paths to block directory traversal attacks (`../../`).
+- **Integrity Validation**: Streaming SHA-512 checksum comparison guarantees uncorrupted and untampered package downloads.
+- **Deterministic Lockfile v2**: Lockfiles are serialized with sorted package keys and verified for CI build parity.
 
 ---
 
-## 📜 License
-MIT
+## 📄 License
+
+MIT © Dave

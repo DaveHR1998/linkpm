@@ -1,0 +1,47 @@
+{
+  "name": "linkpm",
+  "version": "1.0.1",
+  "description": "Lightning-fast NPM package manager with directory links, central store, and stack presets",
+  "type": "module",
+  "main": "./dist/cli.js",
+  "bin": {
+    "linkpm": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "linkpm.png"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "package-manager",
+    "npm",
+    "junctions",
+    "symlinks",
+    "presets",
+    "cache",
+    "fast",
+    "scaffold"
+  ],
+  "author": "Dave",
+  "license": "MIT",
+  "dependencies": {
+    "cac": "^6.7.14",
+    "picocolors": "^1.1.1",
+    "semver": "^7.6.3",
+    "tar": "^7.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.8.7",
+    "@types/semver": "^7.5.8",
+    "@types/tar": "^6.1.13",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

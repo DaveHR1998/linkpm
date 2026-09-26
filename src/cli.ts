@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { cac } from 'cac';
 import pc from 'picocolors';
 import { ensureDirectories, STORE_DIR } from './config/index.js';
@@ -10,7 +11,7 @@ import {
   installFromLockfile
 } from './installer.js';
 import { listPresets, findPreset, saveCustomPreset, removeCustomPreset } from './presets.js';
-import { listStore, clearStore } from './store.js';
+import { listStore, clearStore, runGarbageCollection, getRegisteredProjects } from './store.js';
 import { scaffoldProject } from './scaffolder.js';
 import { runDoctor, printDoctorResults } from './diagnostics/doctor.js';
 import { DependencyResolver } from './resolver/index.js';
@@ -226,8 +227,9 @@ cli
 
 // 8. STORE COMMANDS
 cli
-  .command('store [action]', 'Manage central store (list, clear, path)')
-  .action(async (action: string = 'list') => {
+  .command('store [action]', 'Manage central store (list, status, gc, clear, path)')
+  .option('--dry-run', 'Simulate garbage collection without deleting any files')
+  .action(async (action: string = 'list', options: { dryRun?: boolean }) => {
     const act = action.toLowerCase();
 
     if (act === 'path') {
@@ -235,9 +237,52 @@ cli
       return;
     }
 
+    if (act === 'status') {
+      const stored = listStore();
+      const projects = getRegisteredProjects().filter(p => fs.existsSync(p));
+      let totalSize = 0;
+      let totalVersions = 0;
+      for (const item of stored) {
+        totalSize += item.totalSizeBytes;
+        totalVersions += item.versions.length;
+      }
+      const grandTotalMb = (totalSize / (1024 * 1024)).toFixed(2);
+
+      console.log(pc.bold('\n📦 Central Store Status:'));
+      console.log(`  Location:         ${pc.cyan(STORE_DIR)}`);
+      console.log(`  Unique Packages:  ${pc.bold(stored.length.toString())}`);
+      console.log(`  Package Versions: ${pc.bold(totalVersions.toString())}`);
+      console.log(`  Total Disk Size:  ${pc.green(`${grandTotalMb} MB`)}`);
+      console.log(`  Active Projects:  ${pc.bold(projects.length.toString())}`);
+      return;
+    }
+
+    if (act === 'gc') {
+      const dryRun = Boolean(options.dryRun);
+      console.log(pc.bold(pc.blue('🧹 linkpm store gc:')) + (dryRun ? pc.yellow(' [DRY RUN]') : ''));
+      console.log(pc.dim('Scanning active projects and unused store packages...'));
+
+      const result = runGarbageCollection({ dryRun });
+      const freedMb = (result.freedBytes / (1024 * 1024)).toFixed(2);
+
+      console.log(`\n  Active Projects Tracked: ${pc.bold(result.activeProjects.length.toString())}`);
+      console.log(`  Store Packages Scanned:  ${pc.bold(result.totalStorePackages.toString())}`);
+
+      if (result.prunedCount === 0) {
+        console.log(pc.green('\n✨ Central store is clean. No unreferenced packages to prune.'));
+      } else {
+        const actionWord = dryRun ? 'Would prune' : 'Pruned';
+        console.log(pc.bold(pc.green(`\n✔ ${actionWord} ${result.prunedCount} unreferenced package(s), freeing ${freedMb} MB.`)));
+        for (const pkg of result.prunedPackages) {
+          console.log(`  ${pc.dim('–')} ${pkg}`);
+        }
+      }
+      return;
+    }
+
     if (act === 'list') {
       const stored = listStore();
-      console.log(pc.bold(`\n🏬 Central Store: ${pc.dim(STORE_DIR)}\n`));
+      console.log(pc.bold(`\n📦 Central Store: ${pc.dim(STORE_DIR)}\n`));
       if (stored.length === 0) {
         console.log(pc.dim('  Store is currently empty.'));
         return;
@@ -262,7 +307,7 @@ cli
       return;
     }
 
-    console.log(pc.yellow(`Unknown store action "${action}". Available: list, clear, path.`));
+    console.log(pc.yellow(`Unknown store action "${action}". Available: list, status, gc, clear, path.`));
   });
 
 // 9. INIT COMMAND

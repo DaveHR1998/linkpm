@@ -1,6 +1,6 @@
 import pc from 'picocolors';
 import { resolvePackage, downloadTarball, type ResolvedPackage, type ResolveOptions } from './registry.js';
-import { isPackageInStore, extractToStore, getPackageStoreDir, linkToGlobalNodeModules, linkDependencyIntoStorePackage } from './store.js';
+import { isPackageInStore, extractToStore, getPackageStoreDir, linkToGlobalNodeModules, linkDependencyIntoStorePackage, registerProject } from './store.js';
 import { linkPackage, unlinkPackage, type LinkResult } from './linker.js';
 import { addDependenciesToPackageJson, removeDependenciesFromPackageJson, readPackageJson } from './package-json.js';
 import { updateLockfile, removeLockfileEntries, readLockfile, LOCKFILE_NAME } from './lockfile.js';
@@ -110,6 +110,7 @@ export async function installSinglePackage(
   projectRoot: string,
   options: InstallOptions = {}
 ): Promise<InstallResult> {
+  registerProject(projectRoot);
   const { resolved, storeDir, fromStore, depsLinked } = await ensurePackageInStore(spec, options);
 
   // Link top-level package into project's node_modules/
@@ -133,6 +134,7 @@ export async function installPackages(
   projectRoot: string,
   options: InstallOptions = {}
 ): Promise<InstallResult[]> {
+  registerProject(projectRoot);
   const results: InstallResult[] = [];
 
   for (const spec of specs) {

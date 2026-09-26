@@ -1,3 +1,4 @@
+import { LinkPMError } from './utils/errors.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -21,6 +22,12 @@ export function linkPackage(
   packageName: string,
   storePackageDir: string
 ): LinkResult {
+  if (!fs.existsSync(storePackageDir)) {
+    throw new LinkPMError(`Cannot link package "${packageName}": store directory "${storePackageDir}" does not exist`, {
+      code: 'ERR_STORE_CORRUPTION',
+      packageName
+    });
+  }
   const nodeModulesDir = ensureNodeModules(projectRoot);
 
   let targetDir: string;

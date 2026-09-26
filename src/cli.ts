@@ -15,6 +15,7 @@ import { listStore, clearStore, runGarbageCollection, getRegisteredProjects } fr
 import { scaffoldProject } from './scaffolder.js';
 import { runDoctor, printDoctorResults } from './diagnostics/doctor.js';
 import { DependencyResolver } from './resolver/index.js';
+import { runScript, execBin, runDlx } from './scripts/index.js';
 
 const cli = cac('linkpm');
 
@@ -379,6 +380,82 @@ cli
       console.log(`  ${p.join(pc.dim(' ➔ '))}`);
     }
     console.log('');
+  });
+
+// 13. RUN SCRIPT
+cli
+  .command('run <script> [...args]', 'Run an arbitrary package script')
+  .option('--if-present', 'Avoid exiting with non-zero code if script is not defined')
+  .option('--ignore-scripts', 'Do not run scripts')
+  .action(async (scriptName: string, args: string[] = [], options: { ifPresent?: boolean; ignoreScripts?: boolean }) => {
+    if (!scriptName) {
+      console.log(pc.yellow('Please specify a script name. Example: linkpm run build'));
+      return;
+    }
+    const projectRoot = findProjectRoot();
+    const res = await runScript(projectRoot, scriptName, {
+      extraArgs: Array.isArray(args) ? args : [],
+      ifPresent: options.ifPresent,
+      ignoreScripts: options.ignoreScripts
+    });
+    if (!res.success) {
+      process.exit(res.exitCode);
+    }
+  });
+
+// 14. TEST SCRIPT ALIAS
+cli
+  .command('test [...args]', 'Run the test script from package.json')
+  .action(async (args: string[] = []) => {
+    const projectRoot = findProjectRoot();
+    const res = await runScript(projectRoot, 'test', {
+      extraArgs: Array.isArray(args) ? args : []
+    });
+    if (!res.success) {
+      process.exit(res.exitCode);
+    }
+  });
+
+// 15. START SCRIPT ALIAS
+cli
+  .command('start [...args]', 'Run the start script from package.json')
+  .action(async (args: string[] = []) => {
+    const projectRoot = findProjectRoot();
+    const res = await runScript(projectRoot, 'start', {
+      extraArgs: Array.isArray(args) ? args : []
+    });
+    if (!res.success) {
+      process.exit(res.exitCode);
+    }
+  });
+
+// 16. EXEC COMMAND
+cli
+  .command('exec <command> [...args]', 'Run a shell command within the project node_modules/.bin context')
+  .action(async (command: string, args: string[] = []) => {
+    if (!command) {
+      console.log(pc.yellow('Please specify a command to execute.'));
+      return;
+    }
+    const projectRoot = findProjectRoot();
+    const code = execBin(projectRoot, command, Array.isArray(args) ? args : []);
+    if (code !== 0) {
+      process.exit(code);
+    }
+  });
+
+// 17. DLX COMMAND
+cli
+  .command('dlx <package> [...args]', 'Run a command from an npm package without installing it as a dependency')
+  .action(async (pkgSpec: string, args: string[] = []) => {
+    if (!pkgSpec) {
+      console.log(pc.yellow('Please specify a package to execute. Example: linkpm dlx cowsay hello'));
+      return;
+    }
+    const code = await runDlx(pkgSpec, Array.isArray(args) ? args : []);
+    if (code !== 0) {
+      process.exit(code);
+    }
   });
 
 cli.help();

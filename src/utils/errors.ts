@@ -11,7 +11,10 @@ export type ErrorCode =
   | 'ERR_REGISTRY_REQUEST'
   | 'ERR_INVALID_SPEC'
   | 'ERR_PRESET_NOT_FOUND'
-  | 'ERR_STORE_CORRUPTION';
+  | 'ERR_STORE_CORRUPTION'
+  | 'ERR_COMMAND_FAILED'
+  | 'ERR_PROJECT_NOT_FOUND'
+  | 'ERR_SCRIPT_NOT_FOUND';
 
 export interface LinkPMErrorOptions {
   code: ErrorCode;

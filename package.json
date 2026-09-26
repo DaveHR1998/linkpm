@@ -16,7 +16,8 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/cli.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
   },
   "keywords": [
     "package-manager",

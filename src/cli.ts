@@ -1,6 +1,6 @@
 import { cac } from 'cac';
 import pc from 'picocolors';
-import { ensureDirectories, STORE_DIR } from './config.js';
+import { ensureDirectories, STORE_DIR } from './config/index.js';
 import { findProjectRoot, writePackageJson, readPackageJson } from './package-json.js';
 import {
   installPackages,
@@ -12,6 +12,8 @@ import {
 import { listPresets, findPreset, saveCustomPreset, removeCustomPreset } from './presets.js';
 import { listStore, clearStore } from './store.js';
 import { scaffoldProject } from './scaffolder.js';
+import { runDoctor, printDoctorResults } from './diagnostics/doctor.js';
+import { DependencyResolver } from './resolver/index.js';
 
 const cli = cac('linkpm');
 
@@ -271,6 +273,67 @@ cli
     const pkg = readPackageJson(projectRoot);
     writePackageJson(projectRoot, pkg);
     console.log(pc.green(`✔ Initialized package.json in ${projectRoot}`));
+  });
+
+// 10. DOCTOR COMMAND
+cli
+  .command('doctor', 'Perform environment and installation diagnostics')
+  .action(async () => {
+    const projectRoot = findProjectRoot();
+    const checks = await runDoctor(projectRoot);
+    printDoctorResults(checks);
+  });
+
+// 11. TREE COMMAND
+cli
+  .command('tree', 'Display visual dependency tree of current project')
+  .action(async () => {
+    const projectRoot = findProjectRoot();
+    const pkg = readPackageJson(projectRoot);
+    const deps = pkg.dependencies || {};
+    const devDeps = pkg.devDependencies || {};
+
+    if (Object.keys(deps).length === 0 && Object.keys(devDeps).length === 0) {
+      console.log(pc.yellow('No dependencies found in package.json to display.'));
+      return;
+    }
+
+    console.log(pc.dim('Resolving dependency graph...'));
+    const resolver = new DependencyResolver({ projectRoot, preferOffline: true });
+    const { graph } = await resolver.resolve(deps, devDeps);
+    console.log(pc.bold(`\n🌳 Dependency Tree for ${pc.cyan(pkg.name || 'project')}:\n`));
+    console.log(graph.toTreeString());
+    console.log('');
+  });
+
+// 12. WHY COMMAND
+cli
+  .command('why <package>', 'Explain why a package is in the dependency graph')
+  .action(async (targetPackage: string) => {
+    if (!targetPackage) {
+      console.log(pc.yellow('Please specify a package name. Example: linkpm why lodash'));
+      return;
+    }
+    const projectRoot = findProjectRoot();
+    const pkg = readPackageJson(projectRoot);
+    const deps = pkg.dependencies || {};
+    const devDeps = pkg.devDependencies || {};
+
+    console.log(pc.dim('Resolving dependency graph...'));
+    const resolver = new DependencyResolver({ projectRoot, preferOffline: true });
+    const { graph } = await resolver.resolve(deps, devDeps);
+    const paths = graph.why(targetPackage);
+
+    if (paths.length === 0) {
+      console.log(pc.yellow(`Package "${targetPackage}" is not in the dependency graph.`));
+      return;
+    }
+
+    console.log(pc.bold(`\n🔍 Found ${paths.length} dependency path(s) to ${pc.cyan(targetPackage)}:\n`));
+    for (const p of paths) {
+      console.log(`  ${p.join(pc.dim(' ➔ '))}`);
+    }
+    console.log('');
   });
 
 cli.help();

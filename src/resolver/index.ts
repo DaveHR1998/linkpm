@@ -1,0 +1,260 @@
+import semver from 'semver';
+import { RegistryClient, type PackageVersionMetadata } from '../registry/client.js';
+import { DependencyGraph, type DependencyNode } from '../graph/index.js';
+import { parsePackageSpec } from './spec.js';
+import { shouldSkipOptionalPackage } from './platform.js';
+import { PeerEngine, type PeerValidationResult } from './peer.js';
+import { LinkPMError } from '../utils/errors.js';
+
+export * from './spec.js';
+export * from './platform.js';
+export * from './peer.js';
+
+export interface ResolveOptions {
+  projectRoot?: string;
+  offline?: boolean;
+  preferOffline?: boolean;
+  overrides?: Record<string, string>;
+  strictPeers?: boolean;
+}
+
+export interface ResolveResult {
+  graph: DependencyGraph;
+  peerResult: PeerValidationResult;
+  totalResolved: number;
+}
+
+export class DependencyResolver {
+  private registryClient: RegistryClient;
+  private defaultOptions: ResolveOptions;
+  private overrides: Record<string, string>;
+
+  constructor(options: ResolveOptions = {}) {
+    this.defaultOptions = options;
+    this.registryClient = new RegistryClient({
+      projectRoot: options.projectRoot,
+      offline: options.offline,
+      preferOffline: options.preferOffline ?? true
+    });
+    this.overrides = options.overrides || {};
+  }
+
+  public async resolve(
+    rootDependencies: Record<string, string> = {},
+    rootDevDependencies: Record<string, string> = {},
+    options: ResolveOptions = {}
+  ): Promise<ResolveResult> {
+    const mergedOptions: ResolveOptions = {
+      preferOffline: true,
+      ...this.defaultOptions,
+      ...options
+    };
+
+    const graph = new DependencyGraph();
+    const visitedSpecs = new Map<string, string>(); // "name@range" -> nodeId
+    const queue: Array<{
+      requestedName: string;
+      rawRange: string;
+      isDev: boolean;
+      isOptional: boolean;
+      parentId?: string;
+    }> = [];
+
+    // 1. Enqueue direct dependencies
+    for (const [depName, range] of Object.entries(rootDependencies)) {
+      queue.push({
+        requestedName: depName,
+        rawRange: range,
+        isDev: false,
+        isOptional: false
+      });
+    }
+
+    // 2. Enqueue dev dependencies
+    for (const [depName, range] of Object.entries(rootDevDependencies)) {
+      queue.push({
+        requestedName: depName,
+        rawRange: range,
+        isDev: true,
+        isOptional: false
+      });
+    }
+
+    // 3. Process breadth-first
+    while (queue.length > 0) {
+      const item = queue.shift()!;
+      let { requestedName, rawRange, isDev, isOptional, parentId } = item;
+
+      // Apply overrides if present
+      if (this.overrides[requestedName]) {
+        rawRange = this.overrides[requestedName];
+      }
+
+      // Parse spec (handles aliases like "my-react@npm:react@^18.0.0")
+      const parsed = parsePackageSpec(`${requestedName}@${rawRange}`);
+      const realPackageName = parsed.name || requestedName;
+      const targetRange = parsed.range;
+
+      const cacheKey = `${realPackageName}@${targetRange}`;
+      if (visitedSpecs.has(cacheKey)) {
+        const existingNodeId = visitedSpecs.get(cacheKey)!;
+        if (parentId) {
+          graph.addEdge(parentId, requestedName, existingNodeId);
+        } else {
+          if (isDev) {
+            graph.rootDevDependencies.set(requestedName, existingNodeId);
+          } else {
+            graph.rootDependencies.set(requestedName, existingNodeId);
+          }
+        }
+        continue;
+      }
+
+      // Check if optional package should be skipped due to OS/CPU mismatch
+      if (isOptional && shouldSkipOptionalPackage(realPackageName)) {
+        continue;
+      }
+
+      // Fetch manifest from registry client
+      let manifest;
+      try {
+        manifest = await this.registryClient.getPackageManifest(realPackageName, mergedOptions);
+      } catch (err: any) {
+        if (isOptional) {
+          // Gracefully skip failed optional dependency
+          continue;
+        }
+        throw err;
+      }
+
+      // Resolve version matching targetRange
+      const resolvedVersion = this.matchVersion(realPackageName, targetRange, manifest);
+      const versionMeta: PackageVersionMetadata = manifest.versions[resolvedVersion];
+      if (!versionMeta) {
+        if (isOptional) continue;
+        throw new LinkPMError(`Version metadata for "${realPackageName}@${resolvedVersion}" not found`, {
+          code: 'ERR_VERSION_NOT_FOUND',
+          packageName: realPackageName,
+          requestedVersion: targetRange,
+          resolvedVersion
+        });
+      }
+
+      // Check platform restrictions for non-optional packages
+      if (isOptional && shouldSkipOptionalPackage(realPackageName, { os: versionMeta.os, cpu: versionMeta.cpu })) {
+        continue;
+      }
+
+      const nodeId = `${realPackageName}@${resolvedVersion}`;
+      visitedSpecs.set(cacheKey, nodeId);
+
+      // Add to graph
+      let node = graph.getNode(nodeId);
+      if (!node) {
+        node = {
+          id: nodeId,
+          name: realPackageName,
+          version: resolvedVersion,
+          tarballUrl: versionMeta.dist?.tarball || '',
+          integrity: versionMeta.dist?.integrity,
+          bin: versionMeta.bin,
+          isDev,
+          isOptional,
+          dependencies: new Map(),
+          peerDependencies: versionMeta.peerDependencies || {},
+          peerDependenciesMeta: versionMeta.peerDependenciesMeta,
+          parentIds: new Set()
+        };
+        graph.addNode(node);
+      }
+
+      if (parentId) {
+        graph.addEdge(parentId, requestedName, nodeId);
+      } else {
+        if (isDev) {
+          graph.rootDevDependencies.set(requestedName, nodeId);
+        } else {
+          graph.rootDependencies.set(requestedName, nodeId);
+        }
+      }
+
+      // Enqueue transitive dependencies
+      if (versionMeta.dependencies) {
+        for (const [transDep, transRange] of Object.entries(versionMeta.dependencies)) {
+          queue.push({
+            requestedName: transDep,
+            rawRange: transRange,
+            isDev: false,
+            isOptional: false,
+            parentId: nodeId
+          });
+        }
+      }
+
+      // Enqueue optional dependencies
+      if (versionMeta.optionalDependencies) {
+        for (const [optDep, optRange] of Object.entries(versionMeta.optionalDependencies)) {
+          queue.push({
+            requestedName: optDep,
+            rawRange: optRange,
+            isDev: false,
+            isOptional: true,
+            parentId: nodeId
+          });
+        }
+      }
+    }
+
+    // 4. Validate peer dependencies across the whole graph
+    const peerResult = PeerEngine.validate(graph);
+    if (!peerResult.valid && mergedOptions.strictPeers) {
+      throw peerResult.conflicts[0];
+    }
+
+    return {
+      graph,
+      peerResult,
+      totalResolved: graph.nodes.size
+    };
+  }
+
+  private matchVersion(name: string, range: string, manifest: any): string {
+    const versions = Object.keys(manifest.versions || {});
+    if (versions.length === 0) {
+      throw new LinkPMError(`No published versions found for "${name}"`, {
+        code: 'ERR_VERSION_NOT_FOUND',
+        packageName: name
+      });
+    }
+
+    // Check dist-tags e.g. "latest", "next", "beta"
+    if (manifest['dist-tags'] && manifest['dist-tags'][range]) {
+      return manifest['dist-tags'][range];
+    }
+
+    // Check exact version
+    if (semver.valid(range) && versions.includes(range)) {
+      return range;
+    }
+
+    // Semver range matching
+    const matched = semver.maxSatisfying(versions, range, { includePrerelease: false }) ||
+                    semver.maxSatisfying(versions, range, { includePrerelease: true });
+
+    if (matched) {
+      return matched;
+    }
+
+    // Fallback to latest tag if nothing satisfied
+    if (manifest['dist-tags']?.latest) {
+      return manifest['dist-tags'].latest;
+    }
+
+    throw new LinkPMError(`No version of "${name}" satisfies range "${range}"`, {
+      code: 'ERR_VERSION_NOT_FOUND',
+      packageName: name,
+      requestedVersion: range,
+      hint: `Available versions: ${versions.slice(-5).join(', ')}`
+    });
+  }
+}

@@ -1,0 +1,191 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import semver from 'semver';
+import type { DependencyGraph, DependencyNode } from '../graph/index.js';
+import { LinkPMError } from '../utils/errors.js';
+
+export interface LockfilePackageV2 {
+  version: string;
+  resolved: string;
+  integrity?: string;
+  isDev?: boolean;
+  isOptional?: boolean;
+  dependencies?: Record<string, string>; // depName -> version
+  peerDependencies?: Record<string, string>;
+}
+
+export interface LockfileV2 {
+  lockfileVersion: 2;
+  packages: Record<string, LockfilePackageV2>;
+}
+
+export const LOCKFILE_NAME = 'linkpm-lock.json';
+
+export function getLockfilePath(projectRoot: string): string {
+  return path.join(projectRoot, LOCKFILE_NAME);
+}
+
+export function readLockfile(projectRoot: string): LockfileV2 | null {
+  const filePath = getLockfilePath(projectRoot);
+  if (!fs.existsSync(filePath)) return null;
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    if (raw.lockfileVersion === 1) {
+      // Upgrade v1 to v2 in memory
+      const upgraded: LockfileV2 = {
+        lockfileVersion: 2,
+        packages: raw.packages || {}
+      };
+      return upgraded;
+    }
+    return raw as LockfileV2;
+  } catch {
+    return null;
+  }
+}
+
+export function writeLockfile(projectRoot: string, lockfile: LockfileV2): void {
+  const filePath = getLockfilePath(projectRoot);
+
+  // Alphabetically sort package entries for deterministic output
+  const sortedPackages: Record<string, LockfilePackageV2> = {};
+  for (const key of Object.keys(lockfile.packages).sort()) {
+    const entry = lockfile.packages[key];
+    const sortedDeps: Record<string, string> = {};
+    if (entry.dependencies) {
+      for (const d of Object.keys(entry.dependencies).sort()) {
+        sortedDeps[d] = entry.dependencies[d];
+      }
+    }
+
+    sortedPackages[key] = {
+      version: entry.version,
+      resolved: entry.resolved,
+      integrity: entry.integrity,
+      isDev: entry.isDev,
+      isOptional: entry.isOptional,
+      dependencies: Object.keys(sortedDeps).length > 0 ? sortedDeps : undefined,
+      peerDependencies: entry.peerDependencies && Object.keys(entry.peerDependencies).length > 0 ? entry.peerDependencies : undefined
+    };
+  }
+
+  const output: LockfileV2 = {
+    lockfileVersion: 2,
+    packages: sortedPackages
+  };
+
+  fs.writeFileSync(filePath, JSON.stringify(output, null, 2) + '\n', 'utf-8');
+}
+
+export function updateLockfile(
+  projectRoot: string,
+  entries: Array<{
+    name: string;
+    version: string;
+    tarballUrl: string;
+    integrity?: string;
+    isDev?: boolean;
+    dependencies?: Record<string, string>;
+  }>
+): void {
+  const existing = readLockfile(projectRoot) || {
+    lockfileVersion: 2,
+    packages: {}
+  };
+
+  for (const entry of entries) {
+    const key = `${entry.name}@${entry.version}`;
+    existing.packages[key] = {
+      version: entry.version,
+      resolved: entry.tarballUrl,
+      integrity: entry.integrity,
+      isDev: entry.isDev,
+      dependencies: entry.dependencies
+    };
+  }
+
+  writeLockfile(projectRoot, existing);
+}
+
+export function removeLockfileEntries(projectRoot: string, packageNames: string[]): void {
+  const existing = readLockfile(projectRoot);
+  if (!existing) return;
+
+  for (const key of Object.keys(existing.packages)) {
+    for (const pkg of packageNames) {
+      if (key.startsWith(`${pkg}@`)) {
+        delete existing.packages[key];
+      }
+    }
+  }
+
+  writeLockfile(projectRoot, existing);
+}
+
+export function createLockfileFromGraph(graph: DependencyGraph): LockfileV2 {
+  const packages: Record<string, LockfilePackageV2> = {};
+
+  for (const node of graph.nodes.values()) {
+    const key = `${node.name}@${node.version}`;
+    const depsRecord: Record<string, string> = {};
+
+    for (const [depName, childId] of node.dependencies.entries()) {
+      const child = graph.getNode(childId);
+      if (child) {
+        depsRecord[depName] = child.version;
+      }
+    }
+
+    packages[key] = {
+      version: node.version,
+      resolved: node.tarballUrl,
+      integrity: node.integrity,
+      isDev: node.isDev,
+      isOptional: node.isOptional,
+      dependencies: Object.keys(depsRecord).length > 0 ? depsRecord : undefined,
+      peerDependencies: Object.keys(node.peerDependencies).length > 0 ? node.peerDependencies : undefined
+    };
+  }
+
+  return {
+    lockfileVersion: 2,
+    packages
+  };
+}
+
+export function verifyLockfileParity(
+  projectRoot: string,
+  pkgJson: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> }
+): { valid: boolean; missing: string[] } {
+  const lockfile = readLockfile(projectRoot);
+  if (!lockfile) {
+    throw new LinkPMError(`No ${LOCKFILE_NAME} found in ${projectRoot}`, {
+      code: 'ERR_LOCKFILE_MISMATCH',
+      hint: 'Run "linkpm install" first to generate a deterministic lockfile before running in CI.'
+    });
+  }
+
+  const missing: string[] = [];
+  const allReqs = { ...(pkgJson.dependencies || {}), ...(pkgJson.devDependencies || {}) };
+
+  for (const [name, range] of Object.entries(allReqs)) {
+    // Find matching entry in lockfile
+    const matched = Object.keys(lockfile.packages).some(key => {
+      if (key.startsWith(`${name}@`)) {
+        const ver = key.slice(name.length + 1);
+        return semver.satisfies(ver, range, { includePrerelease: true }) || range === 'latest';
+      }
+      return false;
+    });
+
+    if (!matched) {
+      missing.push(`${name}@${range}`);
+    }
+  }
+
+  return {
+    valid: missing.length === 0,
+    missing
+  };
+}

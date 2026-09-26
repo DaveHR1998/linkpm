@@ -16,6 +16,7 @@ import { scaffoldProject } from './scaffolder.js';
 import { runDoctor, printDoctorResults } from './diagnostics/doctor.js';
 import { DependencyResolver } from './resolver/index.js';
 import { runScript, execBin, runDlx } from './scripts/index.js';
+import { findWorkspaceRoot, discoverWorkspacePackages, linkWorkspaceDependencies, runWorkspaceScript } from './workspaces/index.js';
 
 const cli = cac('linkpm');
 
@@ -385,13 +386,28 @@ cli
 // 13. RUN SCRIPT
 cli
   .command('run <script> [...args]', 'Run an arbitrary package script')
+  .option('-r, --recursive', 'Run the script across all workspace packages')
+  .option('--filter <filter>', 'Filter workspace packages by name or pattern')
   .option('--if-present', 'Avoid exiting with non-zero code if script is not defined')
   .option('--ignore-scripts', 'Do not run scripts')
-  .action(async (scriptName: string, args: string[] = [], options: { ifPresent?: boolean; ignoreScripts?: boolean }) => {
+  .action(async (scriptName: string, args: string[] = [], options: { recursive?: boolean; filter?: string; ifPresent?: boolean; ignoreScripts?: boolean }) => {
     if (!scriptName) {
       console.log(pc.yellow('Please specify a script name. Example: linkpm run build'));
       return;
     }
+
+    if (options.recursive || options.filter) {
+      const exitCode = await runWorkspaceScript(scriptName, {
+        filter: options.filter,
+        ifPresent: options.ifPresent,
+        extraArgs: Array.isArray(args) ? args : []
+      });
+      if (exitCode !== 0) {
+        process.exit(exitCode);
+      }
+      return;
+    }
+
     const projectRoot = findProjectRoot();
     const res = await runScript(projectRoot, scriptName, {
       extraArgs: Array.isArray(args) ? args : [],
@@ -456,6 +472,42 @@ cli
     if (code !== 0) {
       process.exit(code);
     }
+  });
+
+// 18. WORKSPACE COMMAND
+cli
+  .command('workspace [action]', 'Manage monorepo workspaces (list, link)')
+  .alias('w')
+  .option('--filter <filter>', 'Filter packages by name or pattern')
+  .action(async (action: string = 'list', options: { filter?: string }) => {
+    const rootConfig = findWorkspaceRoot();
+    if (!rootConfig) {
+      console.log(pc.yellow('No workspace configuration (pnpm-workspace.yaml or package.json workspaces) found.'));
+      return;
+    }
+    const packages = discoverWorkspacePackages(rootConfig.root, rootConfig.globs);
+
+    if (action === 'list') {
+      console.log(pc.bold(`\n📦 Monorepo Workspaces (${pc.cyan(packages.length.toString())} packages found):\n`));
+      for (const p of packages) {
+        console.log(`  ${pc.bold(p.name)}@${pc.dim(p.version)} ${pc.dim(p.directory)}`);
+      }
+      console.log('');
+      return;
+    }
+
+    if (action === 'link') {
+      console.log(pc.bold('\n🔗 Linking workspace dependencies...'));
+      const links = linkWorkspaceDependencies(packages);
+      console.log(pc.green(`✔ Successfully linked ${links.length} inter-workspace dependencies.\n`));
+      for (const l of links) {
+        console.log(`  ${pc.cyan(l.sourcePackage)} -> ${pc.bold(l.targetPackage)}`);
+      }
+      console.log('');
+      return;
+    }
+
+    console.log(pc.yellow(`Unknown workspace action "${action}". Available: list, link.`));
   });
 
 cli.help();

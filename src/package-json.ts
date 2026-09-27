@@ -85,3 +85,35 @@ export function removeDependenciesFromPackageJson(
 
   writePackageJson(projectRoot, pkg);
 }
+
+export function getProjectOverrides(projectRoot: string): Record<string, string> {
+  const pkg = readPackageJson(projectRoot);
+  return {
+    ...(pkg.resolutions || {}),
+    ...(pkg.overrides || {}),
+    ...(pkg.pnpm?.overrides || {}),
+    ...(pkg.linkpm?.overrides || {})
+  };
+}
+
+export function getOnlyBuiltDependencies(projectRoot: string): string[] | undefined {
+  const pkg = readPackageJson(projectRoot);
+  const list = pkg.pnpm?.onlyBuiltDependencies || pkg.linkpm?.onlyBuiltDependencies;
+  return Array.isArray(list) ? list : undefined;
+}
+
+export function getPatchedDependencies(projectRoot: string): Record<string, string> {
+  const pkg = readPackageJson(projectRoot);
+  return {
+    ...(pkg.pnpm?.patchedDependencies || {}),
+    ...(pkg.linkpm?.patchedDependencies || {})
+  };
+}
+
+export function addPatchedDependency(projectRoot: string, packageKey: string, patchRelPath: string): void {
+  const pkg = readPackageJson(projectRoot);
+  if (!pkg.pnpm) pkg.pnpm = {};
+  if (!pkg.pnpm.patchedDependencies) pkg.pnpm.patchedDependencies = {};
+  pkg.pnpm.patchedDependencies[packageKey] = patchRelPath.replace(/\\/g, '/');
+  writePackageJson(projectRoot, pkg);
+}

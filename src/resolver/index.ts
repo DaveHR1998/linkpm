@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import semver from 'semver';
 import { RegistryClient, type PackageVersionMetadata } from '../registry/client.js';
 import { DependencyGraph, type DependencyNode } from '../graph/index.js';
@@ -5,6 +7,7 @@ import { parsePackageSpec } from './spec.js';
 import { shouldSkipOptionalPackage } from './platform.js';
 import { PeerEngine, type PeerValidationResult } from './peer.js';
 import { LinkPMError } from '../utils/errors.js';
+import { findWorkspaceRoot, resolveCatalogDependency } from '../workspaces/config.js';
 
 export * from './spec.js';
 export * from './platform.js';
@@ -16,6 +19,7 @@ export interface ResolveOptions {
   preferOffline?: boolean;
   overrides?: Record<string, string>;
   strictPeers?: boolean;
+  catalogs?: Record<string, Record<string, string>>;
 }
 
 export interface ResolveResult {
@@ -85,6 +89,23 @@ export class DependencyResolver {
       const item = queue.shift()!;
       let { requestedName, rawRange, isDev, isOptional, parentId } = item;
 
+      // Resolve catalog spec if present (e.g. "catalog:", "catalog:react18")
+      if (rawRange.startsWith('catalog:')) {
+        const workspaceConfig = findWorkspaceRoot(mergedOptions.projectRoot);
+        const catalogs = mergedOptions.catalogs || workspaceConfig?.catalogs || {};
+        const resolvedCatalog = resolveCatalogDependency(rawRange, requestedName, catalogs);
+        if (resolvedCatalog) {
+          rawRange = resolvedCatalog;
+        } else {
+          throw new LinkPMError(`Cannot resolve catalog dependency "${requestedName}@${rawRange}"`, {
+            code: 'ERR_VERSION_NOT_FOUND',
+            packageName: requestedName,
+            requestedVersion: rawRange,
+            hint: `Ensure "${requestedName}" is declared under "catalog:" or "catalogs:" in pnpm-workspace.yaml.`
+          });
+        }
+      }
+
       // Apply overrides if present
       if (this.overrides[requestedName]) {
         rawRange = this.overrides[requestedName];
@@ -93,6 +114,69 @@ export class DependencyResolver {
       // Parse spec (handles aliases like "my-react@npm:react@^18.0.0")
       const parsed = parsePackageSpec(`${requestedName}@${rawRange}`);
       const realPackageName = parsed.name || requestedName;
+
+      // Also check overrides for realPackageName
+      if (this.overrides[realPackageName]) {
+        rawRange = this.overrides[realPackageName];
+      }
+
+      // Handle local file: and link: protocols directly
+      if (parsed.type === 'file' || parsed.type === 'link') {
+        const localTarget = path.resolve(mergedOptions.projectRoot || process.cwd(), parsed.target || parsed.range);
+        const pkgJsonFile = path.join(localTarget, 'package.json');
+        let localVersion = '1.0.0';
+        let localDeps: Record<string, string> = {};
+        let localBin: any;
+
+        if (fs.existsSync(pkgJsonFile)) {
+          try {
+            const parsedPkg = JSON.parse(fs.readFileSync(pkgJsonFile, 'utf-8'));
+            localVersion = parsedPkg.version || '1.0.0';
+            localDeps = parsedPkg.dependencies || {};
+            localBin = parsedPkg.bin;
+          } catch {}
+        }
+
+        const nodeId = `${realPackageName}@${localVersion}`;
+        let node = graph.getNode(nodeId);
+        if (!node) {
+          node = {
+            id: nodeId,
+            name: realPackageName,
+            version: localVersion,
+            tarballUrl: `file://${localTarget}`,
+            bin: localBin,
+            isDev,
+            isOptional,
+            dependencies: new Map(),
+            peerDependencies: {},
+            parentIds: new Set()
+          };
+          graph.addNode(node);
+        }
+
+        if (parentId) {
+          graph.addEdge(parentId, requestedName, nodeId);
+        } else {
+          if (isDev) {
+            graph.rootDevDependencies.set(requestedName, nodeId);
+          } else {
+            graph.rootDependencies.set(requestedName, nodeId);
+          }
+        }
+
+        for (const [dep, range] of Object.entries(localDeps)) {
+          queue.push({
+            requestedName: dep,
+            rawRange: range,
+            isDev: false,
+            isOptional: false,
+            parentId: nodeId
+          });
+        }
+        continue;
+      }
+
       const targetRange = parsed.range;
 
       const cacheKey = `${realPackageName}@${targetRange}`;

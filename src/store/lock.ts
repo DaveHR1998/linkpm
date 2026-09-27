@@ -5,8 +5,24 @@ export interface LockMetadata {
   time: number;
 }
 
+export interface FileLockOptions {
+  timeoutMs?: number;
+  staleThresholdMs?: number;
+  staleTimeoutMs?: number;
+}
+
 export class FileLock {
-  public static async acquire(lockFilePath: string, timeoutMs: number = 10000, staleThresholdMs: number = 60000): Promise<void> {
+  public static async acquire(
+    lockFilePath: string,
+    timeoutMsOrOptions?: number | FileLockOptions,
+    staleThresholdMsParam?: number
+  ): Promise<void> {
+    const opts: FileLockOptions = typeof timeoutMsOrOptions === 'object' && timeoutMsOrOptions !== null
+      ? timeoutMsOrOptions
+      : { timeoutMs: timeoutMsOrOptions, staleThresholdMs: staleThresholdMsParam };
+
+    const timeoutMs = opts.timeoutMs ?? 10000;
+    const staleThresholdMs = opts.staleThresholdMs ?? opts.staleTimeoutMs ?? 60000;
     const startTime = Date.now();
 
     while (true) {
@@ -25,7 +41,8 @@ export class FileLock {
           try {
             const raw = fs.readFileSync(lockFilePath, 'utf-8');
             const data: LockMetadata = JSON.parse(raw);
-            const isOld = Date.now() - data.time > staleThresholdMs;
+            const lockTime = data.time || (data as any).timestamp || 0;
+            const isOld = Date.now() - lockTime > staleThresholdMs;
 
             // Check if process still alive
             let processDead = false;
@@ -63,8 +80,12 @@ export class FileLock {
     } catch {}
   }
 
-  public static async withLock<T>(lockFilePath: string, fn: () => Promise<T>, timeoutMs?: number): Promise<T> {
-    await FileLock.acquire(lockFilePath, timeoutMs);
+  public static async withLock<T>(
+    lockFilePath: string,
+    fn: () => Promise<T>,
+    timeoutMsOrOptions?: number | FileLockOptions
+  ): Promise<T> {
+    await FileLock.acquire(lockFilePath, timeoutMsOrOptions);
     try {
       return await fn();
     } finally {

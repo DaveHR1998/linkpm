@@ -1,13 +1,40 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import pc from 'picocolors';
 import { resolvePackage, downloadTarball, type ResolvedPackage, type ResolveOptions } from './registry.js';
-import { isPackageInStore, extractToStore, getPackageStoreDir, linkToGlobalNodeModules, linkDependencyIntoStorePackage, registerProject } from './store.js';
+import {
+  isPackageInStore,
+  extractToStore,
+  getPackageStoreDir,
+  linkToGlobalNodeModules,
+  linkDependencyIntoStorePackage,
+  registerProject
+} from './store.js';
 import { linkPackage, unlinkPackage, type LinkResult } from './linker.js';
-import { addDependenciesToPackageJson, removeDependenciesFromPackageJson, readPackageJson } from './package-json.js';
-import { updateLockfile, removeLockfileEntries, readLockfile, LOCKFILE_NAME } from './lockfile.js';
+import {
+  addDependenciesToPackageJson,
+  removeDependenciesFromPackageJson,
+  readPackageJson,
+  getProjectOverrides,
+  getOnlyBuiltDependencies,
+  getPatchedDependencies
+} from './package-json.js';
+import {
+  updateLockfile,
+  removeLockfileEntries,
+  readLockfile,
+  verifyLockfileIntegrity,
+  LOCKFILE_NAME
+} from './lockfile/index.js';
 import { findPreset } from './presets.js';
+import { LinkPMError } from './utils/errors.js';
 
 export interface InstallOptions extends ResolveOptions {
   dev?: boolean;
+  frozenLockfile?: boolean;
+  noPrune?: boolean;
+  ignoreScripts?: boolean;
+  allowAllScripts?: boolean;
 }
 
 export interface InstallResult {
@@ -46,16 +73,41 @@ export function isMatchingPlatform(pkgName: string): boolean {
  */
 export async function ensurePackageInStore(
   spec: string,
-  options: ResolveOptions = {},
+  options: InstallOptions = {},
   visited: Set<string> = new Set()
 ): Promise<{ resolved: ResolvedPackage; storeDir: string; fromStore: boolean; depsLinked: number }> {
-  const resolved = await resolvePackage(spec, options);
+  const projectRoot = options.projectRoot || process.cwd();
+  const overrides = options.overrides || getProjectOverrides(projectRoot);
+  const resolved = await resolvePackage(spec, { ...options, overrides, projectRoot });
+
+  // Handle local path dependency (file: or link:) directly
+  if (resolved.isLocal && resolved.localPath) {
+    return {
+      resolved,
+      storeDir: resolved.localPath,
+      fromStore: true,
+      depsLinked: 0
+    };
+  }
+
   const alreadyInStore = isPackageInStore(resolved.name, resolved.version);
   const storeDir = getPackageStoreDir(resolved.name, resolved.version);
 
   if (!alreadyInStore) {
     const tarballPath = await downloadTarball(resolved);
-    await extractToStore(resolved, tarballPath);
+
+    // Check if there is an active patch for this package
+    const patches = getPatchedDependencies(projectRoot);
+    const patchRel = patches[`${resolved.name}@${resolved.version}`] || patches[resolved.name];
+    const patchFile = patchRel ? path.resolve(projectRoot, patchRel) : undefined;
+    const onlyBuilt = getOnlyBuiltDependencies(projectRoot);
+
+    await extractToStore(resolved, tarballPath, {
+      ignoreScripts: options.ignoreScripts,
+      onlyBuiltDependencies: onlyBuilt,
+      allowAllScripts: options.allowAllScripts,
+      patchFile
+    });
   }
 
   // Ensure global fallback in ~/.linkpm/node_modules/
@@ -111,7 +163,13 @@ export async function installSinglePackage(
   options: InstallOptions = {}
 ): Promise<InstallResult> {
   registerProject(projectRoot);
-  const { resolved, storeDir, fromStore, depsLinked } = await ensurePackageInStore(spec, options);
+  const opts: InstallOptions = {
+    projectRoot,
+    overrides: getProjectOverrides(projectRoot),
+    ...options
+  };
+
+  const { resolved, storeDir, fromStore, depsLinked } = await ensurePackageInStore(spec, opts);
 
   // Link top-level package into project's node_modules/
   const linkRes = linkPackage(projectRoot, resolved.name, storeDir);
@@ -136,11 +194,16 @@ export async function installPackages(
 ): Promise<InstallResult[]> {
   registerProject(projectRoot);
   const results: InstallResult[] = [];
+  const opts: InstallOptions = {
+    projectRoot,
+    overrides: getProjectOverrides(projectRoot),
+    ...options
+  };
 
   for (const spec of specs) {
     const startTime = Date.now();
     try {
-      const res = await installSinglePackage(spec, projectRoot, options);
+      const res = await installSinglePackage(spec, projectRoot, opts);
       const elapsed = Date.now() - startTime;
       const cacheTag = res.fromStore ? pc.green('[cached]') : pc.cyan('[downloaded]');
       const binTag = res.binsLinked.length > 0 ? pc.dim(` (bin: ${res.binsLinked.join(', ')})`) : '';
@@ -204,6 +267,53 @@ export async function uninstallPackages(
   return removed;
 }
 
+export function pruneExtraneousDependencies(projectRoot: string): string[] {
+  const nmDir = path.join(projectRoot, 'node_modules');
+  if (!fs.existsSync(nmDir)) return [];
+
+  const pkg = readPackageJson(projectRoot);
+  const declared = new Set([
+    ...Object.keys(pkg.dependencies || {}),
+    ...Object.keys(pkg.devDependencies || {})
+  ]);
+
+  const pruned: string[] = [];
+  const entries = fs.readdirSync(nmDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (entry.name === '.bin' || entry.name.startsWith('.') || entry.name === 'linkpm-lock.json') {
+      continue;
+    }
+
+    if (entry.name.startsWith('@')) {
+      // Scoped folder
+      const scopeDir = path.join(nmDir, entry.name);
+      if (fs.existsSync(scopeDir) && fs.statSync(scopeDir).isDirectory()) {
+        const scopedEntries = fs.readdirSync(scopeDir, { withFileTypes: true });
+        for (const scopedEntry of scopedEntries) {
+          const fullName = `${entry.name}/${scopedEntry.name}`;
+          if (!declared.has(fullName)) {
+            unlinkPackage(projectRoot, fullName);
+            pruned.push(fullName);
+          }
+        }
+        try {
+          if (fs.readdirSync(scopeDir).length === 0) {
+            fs.rmdirSync(scopeDir);
+          }
+        } catch {}
+      }
+    } else {
+      if (!declared.has(entry.name)) {
+        unlinkPackage(projectRoot, entry.name);
+        pruned.push(entry.name);
+      }
+    }
+  }
+
+  return pruned;
+}
+
 export async function installPreset(
   presetInput: string,
   projectRoot: string,
@@ -241,6 +351,17 @@ export async function installProjectDependencies(
   const deps = pkg.dependencies || {};
   const devDeps = pkg.devDependencies || {};
 
+  // Check frozen lockfile mode
+  if (options.frozenLockfile) {
+    const integrity = verifyLockfileIntegrity(projectRoot);
+    if (!integrity.valid) {
+      throw new LinkPMError(`Lockfile is out of sync with package.json (--frozen-lockfile is enabled)`, {
+        code: 'ERR_LOCKFILE_MISMATCH',
+        hint: `Drifted dependencies:\n  ${integrity.errors.join('\n  ')}\nRun "linkpm install" without --frozen-lockfile to update lockfile.`
+      });
+    }
+  }
+
   const depSpecs = Object.entries(deps).map(([name, ver]) => `${name}@${ver}`);
   const devDepSpecs = Object.entries(devDeps).map(([name, ver]) => `${name}@${ver}`);
 
@@ -263,6 +384,14 @@ export async function installProjectDependencies(
     allResults.push(...res);
   }
 
+  // Prune extraneous packages if not disabled
+  if (!options.noPrune) {
+    const pruned = pruneExtraneousDependencies(projectRoot);
+    if (pruned.length > 0) {
+      console.log(pc.dim(`\n  🧹 Pruned ${pruned.length} extraneous package(s) from node_modules: ${pruned.join(', ')}`));
+    }
+  }
+
   return allResults;
 }
 
@@ -270,6 +399,17 @@ export async function installFromLockfile(
   projectRoot: string,
   options: InstallOptions = {}
 ): Promise<InstallResult[]> {
+  // Check frozen lockfile integrity
+  if (options.frozenLockfile) {
+    const integrity = verifyLockfileIntegrity(projectRoot);
+    if (!integrity.valid) {
+      throw new LinkPMError(`Lockfile is out of sync with package.json (--frozen-lockfile is enabled)`, {
+        code: 'ERR_LOCKFILE_MISMATCH',
+        hint: `Drifted dependencies:\n  ${integrity.errors.join('\n  ')}`
+      });
+    }
+  }
+
   const lockfile = readLockfile(projectRoot);
   if (!lockfile) {
     throw new Error(`No ${LOCKFILE_NAME} found in ${projectRoot}. Run "linkpm install" first to generate one.`);
@@ -284,5 +424,14 @@ export async function installFromLockfile(
   console.log(pc.bold(pc.blue('⚡ linkpm ci:')) + pc.dim(` Installing ${entries.length} locked packages...`));
 
   const specs = entries.map(([key]) => key);
-  return installPackages(specs, projectRoot, options);
+  const results = await installPackages(specs, projectRoot, options);
+
+  if (!options.noPrune) {
+    const pruned = pruneExtraneousDependencies(projectRoot);
+    if (pruned.length > 0) {
+      console.log(pc.dim(`  🧹 Pruned ${pruned.length} extraneous package(s): ${pruned.join(', ')}`));
+    }
+  }
+
+  return results;
 }

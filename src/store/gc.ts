@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { LINKPM_HOME, STORE_DIR, safePackageName } from '../config/index.js';
+import { LINKPM_HOME, getStoreDir, safePackageName } from '../config/index.js';
 import { LOCKFILE_NAME, readLockfile } from '../lockfile/index.js';
 
 export const PROJECTS_FILE = path.join(LINKPM_HOME, 'projects.json');
@@ -80,14 +80,15 @@ export function runGarbageCollection(options: GCOptions = {}): GCResult {
   let freedBytes = 0;
   let totalStorePackages = 0;
 
-  if (fs.existsSync(STORE_DIR)) {
-    const pkgEntries = fs.readdirSync(STORE_DIR, { withFileTypes: true });
+  const storeDir = getStoreDir();
+  if (fs.existsSync(storeDir)) {
+    const pkgEntries = fs.readdirSync(storeDir, { withFileTypes: true });
 
     for (const entry of pkgEntries) {
       if (!entry.isDirectory()) continue;
       const safeName = entry.name;
       const realName = safeName.replace(/__/g, '/');
-      const pkgDir = path.join(STORE_DIR, safeName);
+      const pkgDir = path.join(storeDir, safeName);
       const versionDirs = fs.readdirSync(pkgDir, { withFileTypes: true }).filter(d => d.isDirectory());
 
       totalStorePackages += versionDirs.length;

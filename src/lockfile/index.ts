@@ -158,6 +158,17 @@ export function verifyLockfileParity(
   projectRoot: string,
   pkgJson: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> }
 ): { valid: boolean; missing: string[] } {
+  const result = verifyLockfileIntegrity(projectRoot, pkgJson);
+  return {
+    valid: result.valid,
+    missing: result.errors
+  };
+}
+
+export function verifyLockfileIntegrity(
+  projectRoot: string,
+  customPkgJson?: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> }
+): { valid: boolean; errors: string[] } {
   const lockfile = readLockfile(projectRoot);
   if (!lockfile) {
     throw new LinkPMError(`No ${LOCKFILE_NAME} found in ${projectRoot}`, {
@@ -166,10 +177,33 @@ export function verifyLockfileParity(
     });
   }
 
-  const missing: string[] = [];
-  const allReqs = { ...(pkgJson.dependencies || {}), ...(pkgJson.devDependencies || {}) };
+  let pkgJson = customPkgJson;
+  if (!pkgJson) {
+    const pkgPath = path.join(projectRoot, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      try {
+        pkgJson = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      } catch {}
+    }
+  }
+
+  const errors: string[] = [];
+  const allReqs = { ...(pkgJson?.dependencies || {}), ...(pkgJson?.devDependencies || {}) };
 
   for (const [name, range] of Object.entries(allReqs)) {
+    // If range is catalog: or local, check key presence
+    if (range.startsWith('catalog:')) {
+      const found = Object.keys(lockfile.packages).some(key => key.startsWith(`${name}@`));
+      if (!found) {
+        errors.push(`Missing locked version for catalog dependency "${name}"`);
+      }
+      continue;
+    }
+
+    if (range.startsWith('workspace:') || range.startsWith('file:') || range.startsWith('link:')) {
+      continue;
+    }
+
     // Find matching entry in lockfile
     const matched = Object.keys(lockfile.packages).some(key => {
       if (key.startsWith(`${name}@`)) {
@@ -180,12 +214,13 @@ export function verifyLockfileParity(
     });
 
     if (!matched) {
-      missing.push(`${name}@${range}`);
+      errors.push(`Dependency "${name}@${range}" is not satisfied by any version in ${LOCKFILE_NAME}`);
     }
   }
 
   return {
-    valid: missing.length === 0,
-    missing
+    valid: errors.length === 0,
+    errors
   };
 }
+

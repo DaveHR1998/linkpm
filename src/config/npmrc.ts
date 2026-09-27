@@ -10,6 +10,7 @@ export interface NpmrcConfig {
   cafile?: string;
   proxy?: string;
   httpsProxy?: string;
+  storeDir?: string;
   raw: Record<string, string>;
 }
 
@@ -90,6 +91,7 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
   const cafile = config['cafile'];
   const proxy = config['proxy'] || process.env.HTTP_PROXY || process.env.http_proxy;
   const httpsProxy = config['https-proxy'] || process.env.HTTPS_PROXY || process.env.https_proxy;
+  const storeDir = config['store-dir'] || config['store_dir'];
 
   return {
     registry,
@@ -99,6 +101,7 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
     cafile,
     proxy,
     httpsProxy,
+    storeDir,
     raw: config
   };
 }

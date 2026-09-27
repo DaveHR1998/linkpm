@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { cac } from 'cac';
 import pc from 'picocolors';
-import { ensureDirectories, STORE_DIR } from './config/index.js';
+import { ensureDirectories, getStoreDir, setStoreDir } from './config/index.js';
 import { findProjectRoot, writePackageJson, readPackageJson } from './package-json.js';
 import {
   installPackages,
@@ -18,10 +18,16 @@ import { checkOutdated, printOutdatedTable } from './diagnostics/outdated.js';
 import { runSecurityAudit, printAuditResults } from './diagnostics/audit.js';
 import { DependencyResolver } from './resolver/index.js';
 import { runScript, execBin, runDlx } from './scripts/index.js';
-import { findWorkspaceRoot, discoverWorkspacePackages, linkWorkspaceDependencies, runWorkspaceScript } from './workspaces/index.js';
 import { LinkPMError } from './utils/errors.js';
+import { preparePatch, commitPatch } from './patches/index.js';
 
 const cli = cac('linkpm');
+
+// Support --store-dir passed anywhere in CLI
+const storeDirArgIdx = process.argv.indexOf('--store-dir');
+if (storeDirArgIdx !== -1 && process.argv[storeDirArgIdx + 1]) {
+  setStoreDir(process.argv[storeDirArgIdx + 1]);
+}
 
 ensureDirectories();
 
@@ -130,7 +136,18 @@ cli
   .alias('i')
   .option('--offline', 'Force offline mode (use only cached packages)')
   .option('--prefer-offline', 'Prefer cached packages in store if available')
-  .action(async (options: { offline?: boolean; preferOffline?: boolean }) => {
+  .option('--frozen-lockfile', 'Fail installation if lockfile is out of date')
+  .option('--no-prune', 'Do not prune extraneous packages from node_modules')
+  .option('--ignore-scripts', 'Do not run package install/postinstall lifecycle scripts')
+  .option('--allow-build-scripts', 'Allow all package build scripts without supply-chain restrictions')
+  .action(async (options: {
+    offline?: boolean;
+    preferOffline?: boolean;
+    frozenLockfile?: boolean;
+    noPrune?: boolean;
+    ignoreScripts?: boolean;
+    allowAllScripts?: boolean;
+  }) => {
     const projectRoot = findProjectRoot();
     console.log(pc.bold(pc.blue('⚡ linkpm')) + pc.dim(` installing dependencies in ${projectRoot}`));
     await installProjectDependencies(projectRoot, options);
@@ -141,13 +158,22 @@ cli
 cli
   .command('ci', 'Install exact locked dependencies from linkpm-lock.json')
   .option('--offline', 'Force offline mode')
-  .action(async (options: { offline?: boolean }) => {
+  .option('--frozen-lockfile', 'Strictly verify lockfile against package.json')
+  .option('--no-prune', 'Do not prune extraneous packages')
+  .option('--ignore-scripts', 'Do not run package install/postinstall lifecycle scripts')
+  .action(async (options: {
+    offline?: boolean;
+    frozenLockfile?: boolean;
+    noPrune?: boolean;
+    ignoreScripts?: boolean;
+  }) => {
     const projectRoot = findProjectRoot();
     try {
-      await installFromLockfile(projectRoot, options);
+      await installFromLockfile(projectRoot, { ...options, frozenLockfile: options.frozenLockfile ?? true });
       console.log(pc.green('\n✨ Done! All locked dependencies linked successfully.'));
     } catch (err: any) {
       console.error(pc.red(`\n✖ Error: ${err.message}`));
+      process.exit(1);
     }
   });
 
@@ -250,7 +276,7 @@ cli
     const act = action.toLowerCase();
 
     if (act === 'path') {
-      console.log(STORE_DIR);
+      console.log(getStoreDir());
       return;
     }
 
@@ -266,7 +292,7 @@ cli
       const grandTotalMb = (totalSize / (1024 * 1024)).toFixed(2);
 
       console.log(pc.bold('\n📦 Central Store Status:'));
-      console.log(`  Location:         ${pc.cyan(STORE_DIR)}`);
+      console.log(`  Location:         ${pc.cyan(getStoreDir())}`);
       console.log(`  Unique Packages:  ${pc.bold(stored.length.toString())}`);
       console.log(`  Package Versions: ${pc.bold(totalVersions.toString())}`);
       console.log(`  Total Disk Size:  ${pc.green(`${grandTotalMb} MB`)}`);
@@ -299,7 +325,7 @@ cli
 
     if (act === 'list') {
       const stored = listStore();
-      console.log(pc.bold(`\n📦 Central Store: ${pc.dim(STORE_DIR)}\n`));
+      console.log(pc.bold(`\n📦 Central Store: ${pc.dim(getStoreDir())}\n`));
       if (stored.length === 0) {
         console.log(pc.dim('  Store is currently empty.'));
         return;
@@ -542,6 +568,38 @@ cli
     const projectRoot = findProjectRoot();
     const result = await runSecurityAudit(projectRoot);
     printAuditResults(result);
+  });
+
+// 21. PATCH COMMAND
+cli
+  .command('patch <package>', 'Prepare a package for patching by extracting it to a temporary directory')
+  .action(async (packageName: string) => {
+    if (!packageName) {
+      console.log(pc.yellow('Please specify a package name to patch. Example: linkpm patch lodash'));
+      return;
+    }
+    const projectRoot = findProjectRoot();
+    console.log(pc.bold(pc.blue('⚡ linkpm patch:')) + ` Preparing patch environment for ${pc.cyan(packageName)}...`);
+    const { editDir } = await preparePatch(packageName, projectRoot);
+    console.log(pc.bold(pc.green('\n✔ Package extracted successfully!')));
+    console.log(`  Working directory: ${pc.cyan(editDir)}`);
+    console.log(pc.dim('\nMake your code changes inside the directory above. Once done, commit your patch with:'));
+    console.log(`  ${pc.bold(pc.cyan(`linkpm patch-commit "${editDir}"`))}\n`);
+  });
+
+// 22. PATCH-COMMIT COMMAND
+cli
+  .command('patch-commit <editDir>', 'Commit changes made to a patched package and generate a persistent .patch file')
+  .action(async (editDir: string) => {
+    if (!editDir) {
+      console.log(pc.yellow('Please specify the directory containing your edits.'));
+      return;
+    }
+    const projectRoot = findProjectRoot();
+    console.log(pc.bold(pc.blue('⚡ linkpm patch-commit:')) + ` Committing patch from ${pc.dim(editDir)}...`);
+    const { patchRelPath, packageKey } = await commitPatch(editDir, projectRoot);
+    console.log(pc.bold(pc.green(`\n✔ Patch created at ${patchRelPath} and registered in package.json for ${packageKey}.`)));
+    console.log(pc.dim('The patch has been applied directly to your active installation.\n'));
   });
 
 cli.help();

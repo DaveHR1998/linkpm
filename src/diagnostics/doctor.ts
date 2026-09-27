@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import semver from 'semver';
 import pc from 'picocolors';
-import { LINKPM_HOME, STORE_DIR, TARBALLS_DIR, loadNpmrc } from '../config/index.js';
+import { LINKPM_HOME, getStoreDir, TARBALLS_DIR, loadNpmrc } from '../config/index.js';
 import { LOCKFILE_NAME, readLockfile } from '../lockfile/index.js';
 import { readPackageJson } from '../package-json.js';
 
@@ -35,7 +35,7 @@ export async function runDoctor(projectRoot: string = process.cwd()): Promise<Di
   // 3. LinkPM Global Directories
   const dirs = [
     { label: 'LinkPM Home', path: LINKPM_HOME },
-    { label: 'Central Store', path: STORE_DIR },
+    { label: 'Central Store', path: getStoreDir() },
     { label: 'Tarball Cache', path: TARBALLS_DIR }
   ];
 

@@ -1,4 +1,4 @@
-export type SpecType = 'registry' | 'alias' | 'file' | 'link' | 'git' | 'workspace' | 'tarball';
+export type SpecType = 'registry' | 'alias' | 'file' | 'link' | 'git' | 'workspace' | 'catalog' | 'tarball';
 
 export interface ParsedSpec {
   raw: string;
@@ -50,6 +50,17 @@ export function parsePackageSpec(input: string): ParsedSpec {
       type: 'workspace',
       name: '',
       range
+    };
+  }
+
+  // 2b. Catalog protocol: "catalog:", "catalog:default", "catalog:react18"
+  if (trimmed.startsWith('catalog:')) {
+    const catalogName = trimmed.slice('catalog:'.length).trim() || 'default';
+    return {
+      raw: trimmed,
+      type: 'catalog',
+      name: '',
+      range: catalogName
     };
   }
 

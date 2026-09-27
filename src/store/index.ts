@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import { STORE_DIR, safePackageName } from '../config/index.js';
+import { getStoreDir, safePackageName } from '../config/index.js';
 import type { ResolvedPackage } from '../registry.js';
 import { FetchManager } from '../fetch/index.js';
 import { FileLock } from './lock.js';
 import { runGarbageCollection, registerProject } from './gc.js';
+import { applyPatchToDirectory } from '../patches/index.js';
 
 export * from './lock.js';
 export * from './gc.js';
@@ -16,9 +17,16 @@ export interface StoredPackageInfo {
   totalSizeBytes: number;
 }
 
+export interface ExtractOptions {
+  ignoreScripts?: boolean;
+  onlyBuiltDependencies?: string[];
+  allowAllScripts?: boolean;
+  patchFile?: string;
+}
+
 export function getPackageStoreDir(name: string, version: string): string {
   const safeName = safePackageName(name);
-  return path.join(STORE_DIR, safeName, version);
+  return path.join(getStoreDir(), safeName, version);
 }
 
 export function isPackageInStore(name: string, version: string): boolean {
@@ -27,10 +35,20 @@ export function isPackageInStore(name: string, version: string): boolean {
   return fs.existsSync(dir) && fs.existsSync(pkgJsonPath);
 }
 
-export async function extractToStore(pkg: ResolvedPackage, tarballPath: string): Promise<string> {
+export async function extractToStore(
+  pkg: ResolvedPackage,
+  tarballPath: string,
+  options: ExtractOptions = {}
+): Promise<string> {
   const targetDir = getPackageStoreDir(pkg.name, pkg.version);
 
   if (isPackageInStore(pkg.name, pkg.version)) {
+    if (options.patchFile && fs.existsSync(options.patchFile)) {
+      try {
+        const patchContent = fs.readFileSync(options.patchFile, 'utf-8');
+        applyPatchToDirectory(targetDir, patchContent);
+      } catch {}
+    }
     return targetDir;
   }
 
@@ -56,13 +74,21 @@ export async function extractToStore(pkg: ResolvedPackage, tarballPath: string):
       // Safe tar extraction guarding against Zip-Slip path traversal
       await FetchManager.safeExtractTar(tarballPath, tempDir);
 
+      // Apply patch if requested
+      if (options.patchFile && fs.existsSync(options.patchFile)) {
+        try {
+          const patchContent = fs.readFileSync(options.patchFile, 'utf-8');
+          applyPatchToDirectory(tempDir, patchContent);
+        } catch {}
+      }
+
       if (fs.existsSync(targetDir)) {
         fs.rmSync(targetDir, { recursive: true, force: true });
       }
 
       fs.renameSync(tempDir, targetDir);
       linkToGlobalNodeModules(pkg.name, targetDir);
-      runLifecycleScripts(targetDir);
+      runLifecycleScripts(targetDir, options);
       return targetDir;
     } catch (err) {
       if (fs.existsSync(tempDir)) {
@@ -73,8 +99,13 @@ export async function extractToStore(pkg: ResolvedPackage, tarballPath: string):
   });
 }
 
-export function runLifecycleScripts(storePackageDir: string, ignoreScripts: boolean = false): void {
-  if (ignoreScripts) return;
+export function runLifecycleScripts(
+  storePackageDir: string,
+  options: ExtractOptions | boolean = {}
+): void {
+  const opts: ExtractOptions = typeof options === 'boolean' ? { ignoreScripts: options } : options;
+  if (opts.ignoreScripts) return;
+
   const pkgJsonPath = path.join(storePackageDir, 'package.json');
   if (!fs.existsSync(pkgJsonPath)) return;
 
@@ -82,6 +113,26 @@ export function runLifecycleScripts(storePackageDir: string, ignoreScripts: bool
     const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
     const script = pkg.scripts?.install || pkg.scripts?.postinstall;
     if (!script) return;
+
+    // Supply-chain gating: check onlyBuiltDependencies
+    if (opts.onlyBuiltDependencies && opts.onlyBuiltDependencies.length > 0) {
+      const allowed = opts.onlyBuiltDependencies;
+      const baseName = pkg.name.startsWith('@') ? pkg.name.split('/')[1] : pkg.name;
+      if (!allowed.includes(pkg.name) && !allowed.includes(baseName)) {
+        // Block untrusted lifecycle script
+        return;
+      }
+    } else if (!opts.allowAllScripts) {
+      // Default safe whitelist for well-known build tools
+      const SAFE_BUILT_DEPENDENCIES = new Set([
+        'esbuild', '@swc/core', 'sharp', 'prisma', '@prisma/client', 'core-js', 'sqlite3', 'canvas', 'node-gyp'
+      ]);
+      const baseName = pkg.name.startsWith('@') ? pkg.name.split('/')[1] : pkg.name;
+      if (!SAFE_BUILT_DEPENDENCIES.has(pkg.name) && !SAFE_BUILT_DEPENDENCIES.has(baseName)) {
+        // Skip untrusted build script
+        return;
+      }
+    }
 
     execSync(script, {
       cwd: storePackageDir,
@@ -98,7 +149,7 @@ export function runLifecycleScripts(storePackageDir: string, ignoreScripts: bool
 }
 
 export function linkToGlobalNodeModules(packageName: string, storePackageDir: string): void {
-  const globalNm = path.join(STORE_DIR, '..', 'node_modules');
+  const globalNm = path.join(getStoreDir(), '..', 'node_modules');
   if (!fs.existsSync(globalNm)) {
     fs.mkdirSync(globalNm, { recursive: true });
   }
@@ -173,16 +224,17 @@ function getDirectorySize(dirPath: string): number {
 }
 
 export function listStore(): StoredPackageInfo[] {
-  if (!fs.existsSync(STORE_DIR)) return [];
+  const store = getStoreDir();
+  if (!fs.existsSync(store)) return [];
 
   const packages: StoredPackageInfo[] = [];
-  const entries = fs.readdirSync(STORE_DIR, { withFileTypes: true });
+  const entries = fs.readdirSync(store, { withFileTypes: true });
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const safeName = entry.name;
-    const realName = safeName.replace('__', '/');
-    const pkgDir = path.join(STORE_DIR, safeName);
+    const realName = safeName.replace(/__/g, '/');
+    const pkgDir = path.join(store, safeName);
     const versionDirs = fs.readdirSync(pkgDir, { withFileTypes: true })
       .filter(d => d.isDirectory())
       .map(d => d.name);
@@ -201,10 +253,11 @@ export function listStore(): StoredPackageInfo[] {
 }
 
 export function clearStore(): { removedCount: number } {
-  if (!fs.existsSync(STORE_DIR)) return { removedCount: 0 };
-  const entries = fs.readdirSync(STORE_DIR);
+  const store = getStoreDir();
+  if (!fs.existsSync(store)) return { removedCount: 0 };
+  const entries = fs.readdirSync(store);
   for (const entry of entries) {
-    fs.rmSync(path.join(STORE_DIR, entry), { recursive: true, force: true });
+    fs.rmSync(path.join(store, entry), { recursive: true, force: true });
   }
   return { removedCount: entries.length };
 }

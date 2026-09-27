@@ -13,7 +13,25 @@ export interface Preset {
 }
 
 export const LINKPM_HOME = path.join(os.homedir(), '.linkpm');
-export const STORE_DIR = path.join(LINKPM_HOME, 'store');
+
+let customStoreDir: string | null = null;
+
+export function setStoreDir(dir: string | null): void {
+  customStoreDir = dir ? path.resolve(dir) : null;
+  STORE_DIR = getStoreDir();
+}
+
+export function getStoreDir(): string {
+  if (customStoreDir) return customStoreDir;
+  if (process.env.LINKPM_STORE_DIR) return path.resolve(process.env.LINKPM_STORE_DIR);
+  try {
+    const npmrc = loadNpmrc();
+    if (npmrc.storeDir) return path.resolve(npmrc.storeDir);
+  } catch {}
+  return path.join(LINKPM_HOME, 'store');
+}
+
+export let STORE_DIR = getStoreDir();
 export const TARBALLS_DIR = path.join(LINKPM_HOME, 'tarballs');
 export const METADATA_CACHE_DIR = path.join(LINKPM_HOME, 'metadata-cache');
 export const PRESETS_FILE = path.join(LINKPM_HOME, 'presets.json');
@@ -57,8 +75,9 @@ export const BUILTIN_PRESETS: Record<string, Preset> = {
 };
 
 export function ensureDirectories() {
+  const store = getStoreDir();
   if (!fs.existsSync(LINKPM_HOME)) fs.mkdirSync(LINKPM_HOME, { recursive: true });
-  if (!fs.existsSync(STORE_DIR)) fs.mkdirSync(STORE_DIR, { recursive: true });
+  if (!fs.existsSync(store)) fs.mkdirSync(store, { recursive: true });
   if (!fs.existsSync(TARBALLS_DIR)) fs.mkdirSync(TARBALLS_DIR, { recursive: true });
   if (!fs.existsSync(METADATA_CACHE_DIR)) fs.mkdirSync(METADATA_CACHE_DIR, { recursive: true });
 }

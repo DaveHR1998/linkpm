@@ -2,17 +2,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import semver from 'semver';
-import { TARBALLS_DIR, STORE_DIR, safePackageName } from './config.js';
+import { TARBALLS_DIR, getStoreDir, safePackageName } from './config.js';
+import { parsePackageSpec as parseFullSpec } from './resolver/spec.js';
+import { findWorkspaceRoot, resolveCatalogDependency } from './workspaces/config.js';
 
 export interface PackageSpec {
   raw: string;
   name: string;
   range: string;
+  type?: string;
+  target?: string;
 }
 
 export interface ResolveOptions {
   offline?: boolean;
   preferOffline?: boolean;
+  projectRoot?: string;
+  overrides?: Record<string, string>;
+  catalogs?: Record<string, Record<string, string>>;
 }
 
 export interface ResolvedPackage {
@@ -26,34 +33,25 @@ export interface ResolvedPackage {
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
+  isLocal?: boolean;
+  localPath?: string;
 }
 
 export function parsePackageSpec(spec: string): PackageSpec {
-  let name = spec.trim();
-  let range = 'latest';
-
-  if (spec.startsWith('@')) {
-    // Scoped package e.g. @types/node@18.0.0
-    const secondAt = spec.indexOf('@', 1);
-    if (secondAt !== -1) {
-      name = spec.slice(0, secondAt);
-      range = spec.slice(secondAt + 1) || 'latest';
-    }
-  } else {
-    // Unscoped package e.g. express@^4.18.0
-    const firstAt = spec.indexOf('@');
-    if (firstAt !== -1) {
-      name = spec.slice(0, firstAt);
-      range = spec.slice(firstAt + 1) || 'latest';
-    }
-  }
-
-  return { raw: spec, name, range };
+  const parsed = parseFullSpec(spec);
+  return {
+    raw: spec,
+    name: parsed.name,
+    range: parsed.range,
+    type: parsed.type,
+    target: parsed.target
+  };
 }
 
 function resolveFromLocalStore(name: string, range: string): ResolvedPackage | null {
+  const store = getStoreDir();
   const safeName = safePackageName(name);
-  const pkgDir = path.join(STORE_DIR, safeName);
+  const pkgDir = path.join(store, safeName);
   if (!fs.existsSync(pkgDir)) return null;
 
   try {
@@ -96,9 +94,90 @@ function resolveFromLocalStore(name: string, range: string): ResolvedPackage | n
 }
 
 export async function resolvePackage(spec: string, options: ResolveOptions = {}): Promise<ResolvedPackage> {
-  const { name, range } = parsePackageSpec(spec);
+  const parsed = parsePackageSpec(spec);
+  let name = parsed.name;
+  let range = parsed.range;
 
-  // If offline or preferOffline, check local store first
+  // 1. Check overrides
+  if (options.overrides) {
+    if (options.overrides[spec]) {
+      range = options.overrides[spec];
+    } else if (name && options.overrides[name]) {
+      range = options.overrides[name];
+    }
+  }
+
+  // 2. Resolve catalog specs
+  if (range.startsWith('catalog:')) {
+    const ws = findWorkspaceRoot(options.projectRoot);
+    const catalogs = options.catalogs || ws?.catalogs || {};
+    const resolvedCat = resolveCatalogDependency(range, name, catalogs);
+    if (resolvedCat) {
+      range = resolvedCat;
+    } else {
+      throw new Error(`Cannot resolve catalog dependency "${name}@${range}" from workspace catalogs.`);
+    }
+  }
+
+  // 3. Local paths: file: / link:
+  if (parsed.type === 'file' || parsed.type === 'link') {
+    const baseDir = options.projectRoot || process.cwd();
+    const resolvedTarget = path.resolve(baseDir, parsed.target || parsed.range);
+
+    if (!fs.existsSync(resolvedTarget)) {
+      throw new Error(`Local dependency target not found: ${resolvedTarget}`);
+    }
+
+    // Check if it's a directory containing package.json
+    const pkgJsonPath = path.join(resolvedTarget, 'package.json');
+    if (fs.existsSync(pkgJsonPath)) {
+      const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+      const localName = pkgJson.name || name || path.basename(resolvedTarget);
+      const localVersion = pkgJson.version || '1.0.0';
+
+      return {
+        name: localName,
+        version: localVersion,
+        tarballUrl: `file://${resolvedTarget}`,
+        tarballPath: resolvedTarget,
+        bin: pkgJson.bin,
+        dependencies: pkgJson.dependencies,
+        devDependencies: pkgJson.devDependencies,
+        peerDependencies: pkgJson.peerDependencies,
+        optionalDependencies: pkgJson.optionalDependencies,
+        isLocal: true,
+        localPath: resolvedTarget
+      };
+    }
+
+    // If it's a local tarball file
+    if (resolvedTarget.endsWith('.tgz') || resolvedTarget.endsWith('.tar.gz')) {
+      return {
+        name: name || path.basename(resolvedTarget).replace(/\.(tgz|tar\.gz)$/, ''),
+        version: '1.0.0',
+        tarballUrl: `file://${resolvedTarget}`,
+        tarballPath: resolvedTarget,
+        isLocal: true,
+        localPath: resolvedTarget
+      };
+    }
+  }
+
+  // 4. Remote Tarball URL
+  if (parsed.type === 'tarball' && parsed.target) {
+    const tarballUrl = parsed.target;
+    const safeName = safePackageName(name || path.basename(tarballUrl).replace(/\.(tgz|tar\.gz)$/, ''));
+    const tarballPath = path.join(TARBALLS_DIR, `${safeName}-remote.tgz`);
+
+    return {
+      name: name || safeName,
+      version: '1.0.0',
+      tarballUrl,
+      tarballPath
+    };
+  }
+
+  // 5. If offline or preferOffline, check local store first
   if (options.offline || options.preferOffline) {
     const local = resolveFromLocalStore(name, range);
     if (local) return local;
@@ -121,14 +200,12 @@ export async function resolvePackage(spec: string, options: ResolveOptions = {})
       }
     });
   } catch (err: any) {
-    // If network fails, try fallback to local store
     const local = resolveFromLocalStore(name, range);
     if (local) return local;
     throw new Error(`Failed to reach npm registry for "${name}": ${err.message}`);
   }
 
   if (!response.ok) {
-    // Try local fallback on 404/500
     const local = resolveFromLocalStore(name, range);
     if (local) return local;
     throw new Error(`Failed to fetch metadata for "${name}" from npm registry (${response.status}: ${response.statusText})`);
@@ -186,6 +263,21 @@ export async function resolvePackage(spec: string, options: ResolveOptions = {})
 export async function downloadTarball(pkg: ResolvedPackage): Promise<string> {
   if (fs.existsSync(pkg.tarballPath)) {
     return pkg.tarballPath;
+  }
+
+  if (pkg.tarballUrl.startsWith('file://')) {
+    const localPath = pkg.tarballUrl.slice(7);
+    if (fs.existsSync(localPath)) {
+      return localPath;
+    }
+  }
+
+  if (!pkg.tarballUrl || !pkg.tarballUrl.startsWith('http')) {
+    throw new Error(`Cannot download tarball for "${pkg.name}": invalid tarball URL "${pkg.tarballUrl}"`);
+  }
+
+  if (!fs.existsSync(TARBALLS_DIR)) {
+    fs.mkdirSync(TARBALLS_DIR, { recursive: true });
   }
 
   const res = await fetch(pkg.tarballUrl);

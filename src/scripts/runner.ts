@@ -100,10 +100,22 @@ export async function runScript(
     }
   }
 
-  // 2. Run target script with extra arguments appended
+function escapeShellArg(arg: string): string {
+  if (process.platform === 'win32') {
+    if (/[\s"\\^&|<>]/.test(arg)) {
+      return `"${arg.replace(/"/g, '""')}"`;
+    }
+    return arg || '""';
+  } else {
+    return `'${arg.replace(/'/g, "'\\''")}'`;
+  }
+}
+
+  // 2. Run target script with extra arguments appended safely
   let mainCommand = scripts[scriptName];
   if (options.extraArgs && options.extraArgs.length > 0) {
-    mainCommand = `${mainCommand} ${options.extraArgs.join(' ')}`;
+    const escapedArgs = options.extraArgs.map(escapeShellArg).join(' ');
+    mainCommand = `${mainCommand} ${escapedArgs}`;
   }
 
   const mainExit = executeSingleCommand(mainCommand, projectRoot, scriptName, pkgJson, options.silent);

@@ -71,11 +71,9 @@ export async function runDlx(packageSpec: string, binArgs: string[] = []): Promi
   // Prepend targetDir/node_modules/.bin to PATH
   const env = buildScriptEnv(targetDir);
 
-  const command = `node "${binAbsolutePath}" ${binArgs.join(' ')}`;
-  const res = spawnSync(command, {
+  const res = spawnSync(process.execPath, [binAbsolutePath, ...binArgs], {
     cwd: process.cwd(),
     stdio: 'inherit',
-    shell: true,
     env
   });
 

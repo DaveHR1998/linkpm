@@ -62,12 +62,26 @@ export class FetchManager {
 
         const buffer = Buffer.from(await res.arrayBuffer());
 
-        // Verify SHA-512 integrity checksum if provided
-        if (task.integrity && task.integrity.startsWith('sha512-')) {
-          const expectedHash = task.integrity.slice(7);
-          const actualHash = crypto.createHash('sha512').update(buffer).digest('base64');
-          if (actualHash !== expectedHash) {
-            throw new IntegrityMismatchError(task.name, task.version, `sha512-${expectedHash}`, `sha512-${actualHash}`);
+        // Verify SHA-512 or SHA-1 integrity checksum if provided
+        if (task.integrity) {
+          if (task.integrity.startsWith('sha512-')) {
+            const expectedHash = task.integrity.slice(7);
+            const actualHash = crypto.createHash('sha512').update(buffer).digest('base64');
+            if (actualHash !== expectedHash) {
+              throw new IntegrityMismatchError(task.name, task.version, `sha512-${expectedHash}`, `sha512-${actualHash}`);
+            }
+          } else if (task.integrity.startsWith('sha1-')) {
+            const expectedHash = task.integrity.slice(5);
+            const actualHash = crypto.createHash('sha1').update(buffer).digest('base64');
+            if (actualHash !== expectedHash) {
+              throw new IntegrityMismatchError(task.name, task.version, `sha1-${expectedHash}`, `sha1-${actualHash}`);
+            }
+          } else if (/^[a-f0-9]{40}$/i.test(task.integrity)) {
+            // Raw 40-character SHA-1 hex
+            const actualHex = crypto.createHash('sha1').update(buffer).digest('hex');
+            if (actualHex.toLowerCase() !== task.integrity.toLowerCase()) {
+              throw new IntegrityMismatchError(task.name, task.version, task.integrity, actualHex);
+            }
           }
         }
 
@@ -137,7 +151,8 @@ export class FetchManager {
       file: tarballPath,
       cwd: resolvedDest,
       strip: 1, // npm tarballs bundle everything inside package/
-      filter: (entryPath: string) => {
+      unlink: true, // Replace existing files safely without following outside links
+      filter: (entryPath: string, entry: any) => {
         // Zip-Slip Protection: prevent path traversal attacks
         const normalized = path.normalize(entryPath);
         if (normalized.startsWith('..') || path.isAbsolute(normalized)) {
@@ -152,6 +167,17 @@ export class FetchManager {
             code: 'ERR_STORE_CORRUPTION'
           });
         }
+
+        // Symlink Traversal Protection
+        if (entry && (entry.type === 'SymbolicLink' || entry.type === 'Link') && entry.linkpath) {
+          const normLink = path.normalize(entry.linkpath);
+          if (normLink.startsWith('..') || path.isAbsolute(normLink)) {
+            throw new LinkPMError(`Security violation: Tar symlink "${entryPath}" targets external path: "${entry.linkpath}"`, {
+              code: 'ERR_STORE_CORRUPTION'
+            });
+          }
+        }
+
         return true;
       }
     });

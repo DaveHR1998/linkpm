@@ -19,12 +19,33 @@ export function execBin(
     ...options.extraEnv
   };
 
-  const fullCommand = args.length > 0 ? `${binName} ${args.join(' ')}` : binName;
+  const binDir = path.join(projectRoot, 'node_modules', '.bin');
+  let targetExecutable = binName;
+  let useShell = false;
 
-  const result = spawnSync(fullCommand, {
+  if (process.platform === 'win32') {
+    const cmdFile = path.join(binDir, `${binName}.cmd`);
+    const plainFile = path.join(binDir, binName);
+    const ps1File = path.join(binDir, `${binName}.ps1`);
+    if (fs.existsSync(cmdFile)) {
+      targetExecutable = cmdFile;
+      useShell = true;
+    } else if (fs.existsSync(plainFile)) {
+      targetExecutable = plainFile;
+    } else if (fs.existsSync(ps1File)) {
+      targetExecutable = ps1File;
+    }
+  } else {
+    const plainFile = path.join(binDir, binName);
+    if (fs.existsSync(plainFile)) {
+      targetExecutable = plainFile;
+    }
+  }
+
+  const result = spawnSync(targetExecutable, args, {
     cwd: projectRoot,
     stdio: 'inherit',
-    shell: true,
+    shell: useShell,
     env
   });
 

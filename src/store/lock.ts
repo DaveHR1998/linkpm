@@ -12,11 +12,48 @@ export interface FileLockOptions {
 }
 
 export class FileLock {
+  private static activeLocks: Set<string> = new Set();
+  private static handlersRegistered = false;
+
+  private static registerCleanupHandlers(): void {
+    if (FileLock.handlersRegistered) return;
+    FileLock.handlersRegistered = true;
+
+    const cleanup = () => {
+      FileLock.releaseAll();
+    };
+
+    process.on('SIGINT', () => {
+      cleanup();
+      process.exit(130);
+    });
+    process.on('SIGTERM', () => {
+      cleanup();
+      process.exit(143);
+    });
+    process.on('exit', () => {
+      cleanup();
+    });
+  }
+
+  public static releaseAll(): void {
+    for (const lockPath of FileLock.activeLocks) {
+      try {
+        if (fs.existsSync(lockPath)) {
+          fs.unlinkSync(lockPath);
+        }
+      } catch {}
+    }
+    FileLock.activeLocks.clear();
+  }
+
   public static async acquire(
     lockFilePath: string,
     timeoutMsOrOptions?: number | FileLockOptions,
     staleThresholdMsParam?: number
   ): Promise<void> {
+    FileLock.registerCleanupHandlers();
+
     const opts: FileLockOptions = typeof timeoutMsOrOptions === 'object' && timeoutMsOrOptions !== null
       ? timeoutMsOrOptions
       : { timeoutMs: timeoutMsOrOptions, staleThresholdMs: staleThresholdMsParam };
@@ -34,6 +71,7 @@ export class FileLock {
         const fd = fs.openSync(lockFilePath, 'wx'); // O_CREAT | O_EXCL
         fs.writeFileSync(fd, JSON.stringify(metadata), 'utf-8');
         fs.closeSync(fd);
+        FileLock.activeLocks.add(lockFilePath);
         return; // Successfully locked
       } catch (err: any) {
         if (err.code === 'EEXIST') {
@@ -73,6 +111,7 @@ export class FileLock {
   }
 
   public static release(lockFilePath: string): void {
+    FileLock.activeLocks.delete(lockFilePath);
     try {
       if (fs.existsSync(lockFilePath)) {
         fs.unlinkSync(lockFilePath);

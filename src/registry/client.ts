@@ -108,10 +108,26 @@ export class RegistryClient {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
-        const res = await fetch(fullUrl, {
-          headers,
-          signal: controller.signal
+        let reqHeaders = { ...headers };
+        let currentUrl = fullUrl;
+        let res = await fetch(currentUrl, {
+          headers: reqHeaders,
+          signal: controller.signal,
+          redirect: 'manual'
         });
+
+        // Strip Authorization header if redirected to an external host (e.g. S3 / CDN)
+        if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+          const redirectLocation = new URL(res.headers.get('location')!, currentUrl);
+          const origHost = new URL(currentUrl).host;
+          if (redirectLocation.host !== origHost) {
+            delete reqHeaders['Authorization'];
+          }
+          res = await fetch(redirectLocation.toString(), {
+            headers: reqHeaders,
+            signal: controller.signal
+          });
+        }
         clearTimeout(timer);
 
         if (res.status === 404) {

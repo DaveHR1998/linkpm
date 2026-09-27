@@ -42,20 +42,8 @@ export function linkPackage(
     targetDir = path.join(nodeModulesDir, packageName);
   }
 
-  // Remove existing target if it exists
-  if (fs.existsSync(targetDir) || isSymbolicOrJunction(targetDir)) {
-    try {
-      const stats = fs.lstatSync(targetDir);
-      if (stats.isSymbolicLink()) {
-        fs.unlinkSync(targetDir);
-      } else if (stats.isDirectory()) {
-        fs.rmSync(targetDir, { recursive: true, force: true });
-      }
-    } catch {
-      // Fallback removal
-      fs.rmSync(targetDir, { recursive: true, force: true });
-    }
-  }
+  // Safely remove existing target without deleting store target contents
+  safeRemoveLinkOrDir(targetDir);
 
   // Create junction on Windows, symlink on Unix
   const linkType = process.platform === 'win32' ? 'junction' : 'dir';
@@ -70,6 +58,46 @@ export function linkPackage(
     targetDir,
     binsLinked
   };
+}
+
+export function safeRemoveLinkOrDir(targetPath: string): boolean {
+  try {
+    const stat = fs.lstatSync(targetPath);
+    if (stat.isSymbolicLink()) {
+      fs.unlinkSync(targetPath);
+      return true;
+    }
+
+    if (process.platform === 'win32') {
+      // On Windows, rmdirSync safely unmounts junctions without deleting target contents
+      try {
+        fs.rmdirSync(targetPath);
+        return true;
+      } catch {
+        // Fall back to unlinkSync
+        try {
+          fs.unlinkSync(targetPath);
+          return true;
+        } catch {}
+      }
+    }
+
+    fs.rmSync(targetPath, { recursive: true, force: true });
+    return true;
+  } catch {
+    // If broken link
+    try {
+      fs.unlinkSync(targetPath);
+      return true;
+    } catch {
+      try {
+        fs.rmdirSync(targetPath);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
 }
 
 function isSymbolicOrJunction(targetPath: string): boolean {
@@ -193,20 +221,7 @@ export function unlinkPackage(projectRoot: string, packageName: string): boolean
     } catch {}
   }
 
-  if (fs.existsSync(targetDir) || isSymbolicOrJunction(targetDir)) {
-    try {
-      const stats = fs.lstatSync(targetDir);
-      if (stats.isSymbolicLink()) {
-        fs.unlinkSync(targetDir);
-      } else {
-        fs.rmSync(targetDir, { recursive: true, force: true });
-      }
-      removed = true;
-    } catch {
-      fs.rmSync(targetDir, { recursive: true, force: true });
-      removed = true;
-    }
-  }
+  removed = safeRemoveLinkOrDir(targetDir);
 
   // If scoped, clean scope dir if empty
   if (packageName.startsWith('@')) {

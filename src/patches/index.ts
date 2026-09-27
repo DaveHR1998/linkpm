@@ -237,20 +237,43 @@ function computeLineDiff(oldText: string, newText: string, filename: string): st
 /**
  * Applies a unified diff patch to a target directory.
  */
+interface FilePatchHunk {
+  origStart: number;
+  origCount: number;
+  lines: string[];
+}
+
 export function applyPatchToDirectory(targetDir: string, patchContent: string): void {
   const lines = patchContent.split(/\r?\n/);
   let currentFile: string | null = null;
   let isNew = false;
   let isDelete = false;
-  let hunkLines: string[] = [];
+  let currentHunks: FilePatchHunk[] = [];
+  let currentHunk: FilePatchHunk | null = null;
 
-  const flushHunk = () => {
+  const flushFile = () => {
     if (!currentFile) return;
-    const dest = path.join(targetDir, currentFile);
+
+    // Zip-Slip Path Traversal Protection
+    const normalizedFile = path.normalize(currentFile).replace(/^([/\\])+/, '');
+    if (normalizedFile.startsWith('..') || path.isAbsolute(normalizedFile)) {
+      throw new LinkPMError(`Security violation: Malicious path traversal in patch: "${currentFile}"`, {
+        code: 'ERR_STORE_CORRUPTION',
+        hint: 'Patch files cannot reference files outside of the target package directory.'
+      });
+    }
+
+    const resolvedTarget = path.resolve(targetDir);
+    const dest = path.resolve(resolvedTarget, normalizedFile);
+    if (!dest.startsWith(resolvedTarget + path.sep) && dest !== resolvedTarget) {
+      throw new LinkPMError(`Security violation: Patch path "${currentFile}" escapes target directory`, {
+        code: 'ERR_STORE_CORRUPTION'
+      });
+    }
 
     if (isDelete) {
       if (fs.existsSync(dest)) {
-        fs.unlinkSync(dest);
+        try { fs.unlinkSync(dest); } catch {}
       }
       return;
     }
@@ -258,29 +281,41 @@ export function applyPatchToDirectory(targetDir: string, patchContent: string): 
     if (isNew) {
       const parent = path.dirname(dest);
       if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
-      const addedLines = hunkLines.filter(l => l.startsWith('+')).map(l => l.slice(1));
+      const addedLines: string[] = [];
+      for (const hunk of currentHunks) {
+        for (const l of hunk.lines) {
+          if (l.startsWith('+')) addedLines.push(l.slice(1));
+        }
+      }
       fs.writeFileSync(dest, addedLines.join('\n'), 'utf-8');
       return;
     }
 
     // Modification
     if (fs.existsSync(dest)) {
-      let orig = fs.readFileSync(dest, 'utf-8').split(/\r?\n/);
+      const orig = fs.readFileSync(dest, 'utf-8').split(/\r?\n/);
       let newResult: string[] = [];
       let origIdx = 0;
 
-      for (const line of hunkLines) {
-        if (line.startsWith(' ')) {
-          newResult.push(orig[origIdx] !== undefined ? orig[origIdx] : line.slice(1));
-          origIdx++;
-        } else if (line.startsWith('+')) {
-          newResult.push(line.slice(1));
-        } else if (line.startsWith('-')) {
-          origIdx++; // skip line
+      for (const hunk of currentHunks) {
+        const targetStart = Math.max(0, hunk.origStart - 1);
+        while (origIdx < targetStart && origIdx < orig.length) {
+          newResult.push(orig[origIdx++]);
+        }
+
+        for (const line of hunk.lines) {
+          if (line.startsWith(' ')) {
+            newResult.push(orig[origIdx] !== undefined ? orig[origIdx] : line.slice(1));
+            origIdx++;
+          } else if (line.startsWith('+')) {
+            newResult.push(line.slice(1));
+          } else if (line.startsWith('-')) {
+            origIdx++;
+          }
         }
       }
 
-      // Append any remainder
+      // Append remaining original lines
       while (origIdx < orig.length) {
         newResult.push(orig[origIdx++]);
       }
@@ -293,13 +328,15 @@ export function applyPatchToDirectory(targetDir: string, patchContent: string): 
     const line = lines[idx];
 
     if (line.startsWith('diff --git')) {
-      if (currentFile && hunkLines.length > 0) {
-        flushHunk();
+      if (currentFile) {
+        if (currentHunk) currentHunks.push(currentHunk);
+        flushFile();
       }
       currentFile = null;
       isNew = false;
       isDelete = false;
-      hunkLines = [];
+      currentHunks = [];
+      currentHunk = null;
     } else if (line.startsWith('new file mode')) {
       isNew = true;
     } else if (line.startsWith('deleted file mode')) {
@@ -309,15 +346,22 @@ export function applyPatchToDirectory(targetDir: string, patchContent: string): 
     } else if (line.startsWith('--- a/') && !currentFile) {
       currentFile = line.slice(6).trim();
     } else if (line.startsWith('@@')) {
-      // Hunk header
-      continue;
-    } else if (currentFile && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) {
-      hunkLines.push(line);
+      // Hunk header: @@ -origStart,origCount +newStart,newCount @@
+      if (currentHunk) {
+        currentHunks.push(currentHunk);
+      }
+      const match = line.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+      const origStart = match ? parseInt(match[1], 10) : 1;
+      const origCount = match && match[2] ? parseInt(match[2], 10) : 1;
+      currentHunk = { origStart, origCount, lines: [] };
+    } else if (currentHunk && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) {
+      currentHunk.lines.push(line);
     }
   }
 
-  if (currentFile && hunkLines.length > 0) {
-    flushHunk();
+  if (currentFile) {
+    if (currentHunk) currentHunks.push(currentHunk);
+    flushFile();
   }
 }
 

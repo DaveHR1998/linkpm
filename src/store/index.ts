@@ -204,14 +204,20 @@ export function linkDependencyIntoStorePackage(
   }
 }
 
-function getDirectorySize(dirPath: string): number {
+function getDirectorySize(dirPath: string, visited: Set<string> = new Set()): number {
   let size = 0;
   try {
+    let realPath = dirPath;
+    try { realPath = fs.realpathSync(dirPath); } catch {}
+    if (visited.has(realPath)) return 0;
+    visited.add(realPath);
+
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
       const fullPath = path.join(dirPath, entry.name);
       if (entry.isDirectory()) {
-        size += getDirectorySize(fullPath);
+        size += getDirectorySize(fullPath, visited);
       } else if (entry.isFile()) {
         try {
           const stats = fs.statSync(fullPath);

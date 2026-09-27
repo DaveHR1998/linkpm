@@ -274,7 +274,9 @@ export function pruneExtraneousDependencies(projectRoot: string): string[] {
   const pkg = readPackageJson(projectRoot);
   const declared = new Set([
     ...Object.keys(pkg.dependencies || {}),
-    ...Object.keys(pkg.devDependencies || {})
+    ...Object.keys(pkg.devDependencies || {}),
+    ...Object.keys(pkg.optionalDependencies || {}),
+    ...Object.keys(pkg.peerDependencies || {})
   ]);
 
   const pruned: string[] = [];

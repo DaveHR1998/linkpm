@@ -31,7 +31,7 @@ if (storeDirArgIdx !== -1 && process.argv[storeDirArgIdx + 1]) {
 
 ensureDirectories();
 
-process.on('unhandledRejection', (err: any) => {
+const handleFatal = (err: any) => {
   if (err instanceof LinkPMError) {
     console.error(`\n${pc.bold(pc.red('✖ Error'))} [${pc.dim(err.code)}]: ${err.message}`);
     if (err.hint) {
@@ -41,7 +41,10 @@ process.on('unhandledRejection', (err: any) => {
   }
   console.error(`\n${pc.bold(pc.red('✖ Fatal error:'))} ${err?.message || err}\n`);
   process.exit(1);
-});
+};
+
+process.on('unhandledRejection', handleFatal);
+process.on('uncaughtException', handleFatal);
 
 // 0. CREATE / SCAFFOLD COMMAND
 cli
@@ -51,6 +54,7 @@ cli
       await scaffoldProject(template, projectName);
     } catch (err: any) {
       console.error(pc.red(`\n✖ Error: ${err.message}`));
+      process.exit(1);
     }
   });
 

@@ -39,20 +39,47 @@ export function getRegisteredProjects(): string[] {
   }
 }
 
-function getDirectorySize(dirPath: string): number {
+function getDirectorySize(dirPath: string, visited: Set<string> = new Set()): number {
   let size = 0;
   try {
+    let realPath = dirPath;
+    try { realPath = fs.realpathSync(dirPath); } catch {}
+    if (visited.has(realPath)) return 0;
+    visited.add(realPath);
+
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
       const full = path.join(dirPath, entry.name);
       if (entry.isDirectory()) {
-        size += getDirectorySize(full);
+        size += getDirectorySize(full, visited);
       } else if (entry.isFile()) {
         try { size += fs.statSync(full).size; } catch {}
       }
     }
   } catch {}
   return size;
+}
+
+function safeRemoveStorePackage(dirPath: string): void {
+  try {
+    // If it contains internal node_modules with junctions, unmount them first
+    const internalNm = path.join(dirPath, 'node_modules');
+    if (fs.existsSync(internalNm)) {
+      try {
+        const nmEntries = fs.readdirSync(internalNm, { withFileTypes: true });
+        for (const nmEntry of nmEntries) {
+          const nmItemPath = path.join(internalNm, nmEntry.name);
+          if (nmEntry.isSymbolicLink()) {
+            try { fs.unlinkSync(nmItemPath); } catch {}
+          } else if (process.platform === 'win32') {
+            try { fs.rmdirSync(nmItemPath); } catch {}
+          }
+        }
+      } catch {}
+    }
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch {}
 }
 
 export function runGarbageCollection(options: GCOptions = {}): GCResult {
@@ -105,9 +132,7 @@ export function runGarbageCollection(options: GCOptions = {}): GCResult {
           prunedPackages.push(key);
 
           if (!options.dryRun) {
-            try {
-              fs.rmSync(dirToPrune, { recursive: true, force: true });
-            } catch {}
+            safeRemoveStorePackage(dirToPrune);
           }
         }
       }

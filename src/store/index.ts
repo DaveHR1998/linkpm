@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { getStoreDir, safePackageName } from '../config/index.js';
 import type { ResolvedPackage } from '../registry.js';
@@ -24,6 +25,10 @@ export interface ExtractOptions {
   patchFile?: string;
 }
 
+export function computePatchHash(patchContent: string): string {
+  return crypto.createHash('sha256').update(patchContent.trim()).digest('hex').slice(0, 8);
+}
+
 export function getPackageStoreDir(name: string, version: string): string {
   const safeName = safePackageName(name);
   return path.join(getStoreDir(), safeName, version);
@@ -40,15 +45,20 @@ export async function extractToStore(
   tarballPath: string,
   options: ExtractOptions = {}
 ): Promise<string> {
-  const targetDir = getPackageStoreDir(pkg.name, pkg.version);
+  let effectiveVersion = pkg.version;
+  let patchContent: string | null = null;
 
-  if (isPackageInStore(pkg.name, pkg.version)) {
-    if (options.patchFile && fs.existsSync(options.patchFile)) {
-      try {
-        const patchContent = fs.readFileSync(options.patchFile, 'utf-8');
-        applyPatchToDirectory(targetDir, patchContent);
-      } catch {}
-    }
+  if (options.patchFile && fs.existsSync(options.patchFile)) {
+    try {
+      patchContent = fs.readFileSync(options.patchFile, 'utf-8');
+      const patchHash = computePatchHash(patchContent);
+      effectiveVersion = `${pkg.version}_patch_${patchHash}`;
+    } catch {}
+  }
+
+  const targetDir = getPackageStoreDir(pkg.name, effectiveVersion);
+
+  if (isPackageInStore(pkg.name, effectiveVersion)) {
     return targetDir;
   }
 
@@ -60,7 +70,7 @@ export async function extractToStore(
 
   // Cross-process file lock ensures atomic extraction with no concurrency races
   return FileLock.withLock(lockPath, async () => {
-    if (isPackageInStore(pkg.name, pkg.version)) {
+    if (isPackageInStore(pkg.name, effectiveVersion)) {
       return targetDir;
     }
 
@@ -75,11 +85,8 @@ export async function extractToStore(
       await FetchManager.safeExtractTar(tarballPath, tempDir);
 
       // Apply patch if requested
-      if (options.patchFile && fs.existsSync(options.patchFile)) {
-        try {
-          const patchContent = fs.readFileSync(options.patchFile, 'utf-8');
-          applyPatchToDirectory(tempDir, patchContent);
-        } catch {}
+      if (patchContent) {
+        applyPatchToDirectory(tempDir, patchContent);
       }
 
       if (fs.existsSync(targetDir)) {

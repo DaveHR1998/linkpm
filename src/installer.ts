@@ -6,6 +6,7 @@ import {
   isPackageInStore,
   extractToStore,
   getPackageStoreDir,
+  computePatchHash,
   linkToGlobalNodeModules,
   linkDependencyIntoStorePackage,
   registerProject
@@ -90,16 +91,24 @@ export async function ensurePackageInStore(
     };
   }
 
-  const alreadyInStore = isPackageInStore(resolved.name, resolved.version);
-  const storeDir = getPackageStoreDir(resolved.name, resolved.version);
+  // Check if there is an active patch for this package
+  const patches = getPatchedDependencies(projectRoot);
+  const patchRel = patches[`${resolved.name}@${resolved.version}`] || patches[resolved.name];
+  const patchFile = patchRel ? path.resolve(projectRoot, patchRel) : undefined;
+
+  let effectiveVersion = resolved.version;
+  if (patchFile && fs.existsSync(patchFile)) {
+    try {
+      const patchContent = fs.readFileSync(patchFile, 'utf-8');
+      effectiveVersion = `${resolved.version}_patch_${computePatchHash(patchContent)}`;
+    } catch {}
+  }
+
+  const alreadyInStore = isPackageInStore(resolved.name, effectiveVersion);
+  const storeDir = getPackageStoreDir(resolved.name, effectiveVersion);
 
   if (!alreadyInStore) {
     const tarballPath = await downloadTarball(resolved);
-
-    // Check if there is an active patch for this package
-    const patches = getPatchedDependencies(projectRoot);
-    const patchRel = patches[`${resolved.name}@${resolved.version}`] || patches[resolved.name];
-    const patchFile = patchRel ? path.resolve(projectRoot, patchRel) : undefined;
     const onlyBuilt = getOnlyBuiltDependencies(projectRoot);
 
     await extractToStore(resolved, tarballPath, {

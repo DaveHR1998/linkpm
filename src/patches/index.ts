@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { LINKPM_HOME, safePackageName } from '../config/index.js';
 import { getPackageStoreDir, isPackageInStore } from '../store/index.js';
+import { linkPackage } from '../linker.js';
 import { readPackageJson, addPatchedDependency } from '../package-json.js';
 import { LinkPMError } from '../utils/errors.js';
 
@@ -122,8 +124,21 @@ export async function commitPatch(editDir: string, projectRootOverride?: string)
   // Register in package.json
   addPatchedDependency(projectRoot, packageKey, patchRelPath);
 
-  // Apply patch directly to the active package in node_modules or store
-  applyPatchToDirectory(meta.originalDir, patchContent);
+  // Calculate isolated patch store directory
+  const patchHash = crypto.createHash('sha256').update(patchContent.trim()).digest('hex').slice(0, 8);
+  const patchedStoreDir = getPackageStoreDir(meta.packageName, `${meta.version}_patch_${patchHash}`);
+
+  // Create isolated store directory without mutating the original clean package
+  if (!fs.existsSync(patchedStoreDir)) {
+    fs.mkdirSync(patchedStoreDir, { recursive: true });
+    copyDirectoryRecursive(meta.originalDir, patchedStoreDir);
+    applyPatchToDirectory(patchedStoreDir, patchContent);
+  }
+
+  // Link project's node_modules to the isolated patched store directory
+  try {
+    linkPackage(projectRoot, meta.packageName, patchedStoreDir);
+  } catch {}
 
   // Clean up temporary edit directory
   try {

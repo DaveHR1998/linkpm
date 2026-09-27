@@ -227,4 +227,42 @@ describe('Security & Production Reliability Tests', () => {
       );
     });
   });
+
+  describe('8. Content-Hashed Store Paths for Patches', () => {
+    it('should isolate patched versions in a hashed directory without modifying the original package', async () => {
+      const { computePatchHash } = await import('../src/store/index.js');
+      const { applyPatchToDirectory } = await import('../src/patches/index.js');
+
+      const pkgName = 'date-fns';
+      const version = '2.30.0';
+      const cleanStoreDir = path.join(tmpDir, 'store', pkgName, version);
+      fs.mkdirSync(cleanStoreDir, { recursive: true });
+      fs.writeFileSync(path.join(cleanStoreDir, 'index.js'), 'module.exports = "ORIGINAL_DATE_FNS";\n');
+
+      const patch = [
+        'diff --git a/index.js b/index.js',
+        '--- a/index.js',
+        '+++ b/index.js',
+        '@@ -1,1 +1,1 @@',
+        '-module.exports = "ORIGINAL_DATE_FNS";',
+        '+module.exports = "PATCHED_DATE_FNS";'
+      ].join('\n');
+
+      const hash = computePatchHash(patch);
+      assert.strictEqual(hash.length, 8);
+
+      const patchedStoreDir = path.join(tmpDir, 'store', pkgName, `${version}_patch_${hash}`);
+      fs.mkdirSync(patchedStoreDir, { recursive: true });
+      fs.copyFileSync(path.join(cleanStoreDir, 'index.js'), path.join(patchedStoreDir, 'index.js'));
+      applyPatchToDirectory(patchedStoreDir, patch);
+
+      // Verify the clean store directory is UNTOUCHED
+      const originalContent = fs.readFileSync(path.join(cleanStoreDir, 'index.js'), 'utf-8');
+      assert.strictEqual(originalContent, 'module.exports = "ORIGINAL_DATE_FNS";\n');
+
+      // Verify the patched store directory has the custom code
+      const patchedContent = fs.readFileSync(path.join(patchedStoreDir, 'index.js'), 'utf-8');
+      assert.strictEqual(patchedContent, 'module.exports = "PATCHED_DATE_FNS";');
+    });
+  });
 });

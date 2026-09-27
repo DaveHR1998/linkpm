@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { LinkPMError } from './utils/errors.js';
 
 export interface ProjectPackageJson {
   name?: string;
@@ -12,7 +13,17 @@ export interface ProjectPackageJson {
 }
 
 export function findProjectRoot(cwd: string = process.cwd()): string {
-  return cwd;
+  let current = path.resolve(cwd);
+  while (true) {
+    if (fs.existsSync(path.join(current, 'package.json'))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return cwd;
+    }
+    current = parent;
+  }
 }
 
 export function readPackageJson(projectRoot: string): ProjectPackageJson {
@@ -26,12 +37,11 @@ export function readPackageJson(projectRoot: string): ProjectPackageJson {
   }
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-  } catch {
-    return {
-      name: path.basename(projectRoot),
-      version: '1.0.0',
-      type: 'module'
-    };
+  } catch (err: any) {
+    throw new LinkPMError(`Syntax error in package.json at ${filePath}: ${err.message}`, {
+      code: 'ERR_PROJECT_NOT_FOUND',
+      hint: 'Fix the syntax error in your package.json before proceeding to avoid losing configuration.'
+    });
   }
 }
 

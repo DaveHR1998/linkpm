@@ -195,4 +195,36 @@ describe('Security & Production Reliability Tests', () => {
       assert.strictEqual(hexSha1.length, 40);
     });
   });
+
+  describe('6. findProjectRoot Parent Directory Traversal', () => {
+    it('should find root package.json when called from a deep subdirectory', async () => {
+      const { findProjectRoot } = await import('../src/package-json.js');
+      const rootDir = path.join(tmpDir, 'monorepo-sub');
+      const subDir = path.join(rootDir, 'src', 'components', 'button');
+      fs.mkdirSync(subDir, { recursive: true });
+      fs.writeFileSync(path.join(rootDir, 'package.json'), JSON.stringify({ name: 'root-pkg' }));
+
+      const found = findProjectRoot(subDir);
+      assert.strictEqual(found, rootDir);
+    });
+  });
+
+  describe('7. Corrupted package.json Syntax Error Defense', () => {
+    it('should throw an error and refuse to overwrite corrupted package.json', async () => {
+      const { readPackageJson } = await import('../src/package-json.js');
+      const corruptDir = path.join(tmpDir, 'corrupt-dir');
+      fs.mkdirSync(corruptDir, { recursive: true });
+      const pkgPath = path.join(corruptDir, 'package.json');
+      fs.writeFileSync(pkgPath, '{ "name": "corrupt", invalid_json }');
+
+      assert.throws(
+        () => {
+          readPackageJson(corruptDir);
+        },
+        (err: any) => {
+          return err instanceof LinkPMError && err.message.includes('Syntax error in package.json');
+        }
+      );
+    });
+  });
 });

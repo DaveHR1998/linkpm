@@ -215,6 +215,12 @@ export async function installPackages(
       results.push(res);
     } catch (err: any) {
       console.error(`  ${pc.bold(pc.red('✖'))} ${pc.bold(spec)}: ${err.message}`);
+      // Rollback links created during this install session to preserve clean state
+      for (const r of results) {
+        try {
+          unlinkPackage(projectRoot, r.name);
+        } catch {}
+      }
       throw err;
     }
   }

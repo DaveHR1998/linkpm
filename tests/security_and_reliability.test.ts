@@ -265,4 +265,43 @@ describe('Security & Production Reliability Tests', () => {
       assert.strictEqual(patchedContent, 'module.exports = "PATCHED_DATE_FNS";');
     });
   });
+
+  describe('9. In-Place Store Poisoning Defense: Read-Only Store Permissions', () => {
+    it('should set store files to read-only and prevent accidental writes, then restore write permissions', async () => {
+      const { markStoreDirectoryReadOnly, markStoreDirectoryWritable } = await import('../src/store/index.js');
+
+      const pkgDir = path.join(tmpDir, 'store-ro-test');
+      const subDir = path.join(pkgDir, 'lib');
+      fs.mkdirSync(subDir, { recursive: true });
+
+      const file1 = path.join(pkgDir, 'index.js');
+      const file2 = path.join(subDir, 'helper.js');
+      fs.writeFileSync(file1, 'module.exports = "immutable";');
+      fs.writeFileSync(file2, 'module.exports = "helper";');
+
+      // 1. Mark store directory as read-only
+      markStoreDirectoryReadOnly(pkgDir);
+
+      // 2. Attempting to overwrite should fail with EPERM or EACCES
+      let writeFailed = false;
+      try {
+        fs.writeFileSync(file1, 'module.exports = "POISONED";');
+      } catch (err: any) {
+        writeFailed = err.code === 'EPERM' || err.code === 'EACCES';
+      }
+      assert.strictEqual(writeFailed, true, 'Write to read-only store file should fail with EPERM/EACCES');
+
+      // 3. Mark directory writable again (for GC or patch workspace)
+      markStoreDirectoryWritable(pkgDir);
+
+      // 4. Overwrite should now succeed
+      fs.writeFileSync(file1, 'module.exports = "SAFE_MODIFIED";');
+      assert.strictEqual(fs.readFileSync(file1, 'utf-8'), 'module.exports = "SAFE_MODIFIED";');
+
+      // 5. Cleanup
+      fs.rmSync(pkgDir, { recursive: true, force: true });
+      assert.strictEqual(fs.existsSync(pkgDir), false);
+    });
+  });
 });
+

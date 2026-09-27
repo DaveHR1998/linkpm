@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { LINKPM_HOME, safePackageName } from '../config/index.js';
-import { getPackageStoreDir, isPackageInStore } from '../store/index.js';
+import { getPackageStoreDir, isPackageInStore, markStoreDirectoryReadOnly, markStoreDirectoryWritable } from '../store/index.js';
 import { linkPackage } from '../linker.js';
 import { readPackageJson, addPatchedDependency } from '../package-json.js';
 import { LinkPMError } from '../utils/errors.js';
@@ -69,6 +69,8 @@ export async function preparePatch(packageQuery: string, projectRoot: string): P
 
   // Copy all files from sourceDir to editDir (ignoring internal node_modules)
   copyDirectoryRecursive(sourceDir, editDir);
+  // Ensure the developer's edit workspace is writable so they can modify files
+  markStoreDirectoryWritable(editDir);
 
   const meta: PatchMetadata = {
     packageName: pkgName,
@@ -132,7 +134,10 @@ export async function commitPatch(editDir: string, projectRootOverride?: string)
   if (!fs.existsSync(patchedStoreDir)) {
     fs.mkdirSync(patchedStoreDir, { recursive: true });
     copyDirectoryRecursive(meta.originalDir, patchedStoreDir);
+    markStoreDirectoryWritable(patchedStoreDir);
     applyPatchToDirectory(patchedStoreDir, patchContent);
+    // Protect patched store package with read-only permissions
+    markStoreDirectoryReadOnly(patchedStoreDir);
   }
 
   // Link project's node_modules to the isolated patched store directory
@@ -142,6 +147,7 @@ export async function commitPatch(editDir: string, projectRootOverride?: string)
 
   // Clean up temporary edit directory
   try {
+    markStoreDirectoryWritable(editDir);
     fs.rmSync(editDir, { recursive: true, force: true });
   } catch {}
 

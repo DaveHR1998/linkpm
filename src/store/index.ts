@@ -90,12 +90,15 @@ export async function extractToStore(
       }
 
       if (fs.existsSync(targetDir)) {
+        markStoreDirectoryWritable(targetDir);
         fs.rmSync(targetDir, { recursive: true, force: true });
       }
 
       fs.renameSync(tempDir, targetDir);
       linkToGlobalNodeModules(pkg.name, targetDir);
       runLifecycleScripts(targetDir, options);
+      // Protect global store from in-place edits and store poisoning
+      markStoreDirectoryReadOnly(targetDir);
       return targetDir;
     } catch (err) {
       if (fs.existsSync(tempDir)) {
@@ -104,6 +107,42 @@ export async function extractToStore(
       throw err;
     }
   });
+}
+
+export function markStoreDirectoryReadOnly(dirPath: string): void {
+  try {
+    if (!fs.existsSync(dirPath)) return;
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        markStoreDirectoryReadOnly(fullPath);
+      } else if (entry.isFile()) {
+        try {
+          fs.chmodSync(fullPath, 0o444);
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
+export function markStoreDirectoryWritable(dirPath: string): void {
+  try {
+    if (!fs.existsSync(dirPath)) return;
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        markStoreDirectoryWritable(fullPath);
+      } else if (entry.isFile()) {
+        try {
+          fs.chmodSync(fullPath, 0o666);
+        } catch {}
+      }
+    }
+  } catch {}
 }
 
 export function runLifecycleScripts(
@@ -270,7 +309,9 @@ export function clearStore(): { removedCount: number } {
   if (!fs.existsSync(store)) return { removedCount: 0 };
   const entries = fs.readdirSync(store);
   for (const entry of entries) {
-    fs.rmSync(path.join(store, entry), { recursive: true, force: true });
+    const fullPath = path.join(store, entry);
+    markStoreDirectoryWritable(fullPath);
+    fs.rmSync(fullPath, { recursive: true, force: true });
   }
   return { removedCount: entries.length };
 }

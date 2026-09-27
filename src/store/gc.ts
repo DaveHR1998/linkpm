@@ -61,6 +61,21 @@ function getDirectorySize(dirPath: string, visited: Set<string> = new Set()): nu
   return size;
 }
 
+function makeDirWritable(dirPath: string): void {
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const full = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        makeDirWritable(full);
+      } else if (entry.isFile()) {
+        try { fs.chmodSync(full, 0o666); } catch {}
+      }
+    }
+  } catch {}
+}
+
 function safeRemoveStorePackage(dirPath: string): void {
   try {
     // If it contains internal node_modules with junctions, unmount them first
@@ -78,6 +93,8 @@ function safeRemoveStorePackage(dirPath: string): void {
         }
       } catch {}
     }
+    // Ensure read-only files on Windows can be cleanly deleted
+    makeDirWritable(dirPath);
     fs.rmSync(dirPath, { recursive: true, force: true });
   } catch {}
 }

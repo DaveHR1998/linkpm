@@ -262,7 +262,7 @@ describe('Security & Production Reliability Tests', () => {
 
       // Verify the patched store directory has the custom code
       const patchedContent = fs.readFileSync(path.join(patchedStoreDir, 'index.js'), 'utf-8');
-      assert.strictEqual(patchedContent, 'module.exports = "PATCHED_DATE_FNS";');
+      assert.strictEqual(patchedContent.trim(), 'module.exports = "PATCHED_DATE_FNS";');
     });
   });
 

@@ -27,7 +27,11 @@
     "presets",
     "cache",
     "fast",
-    "scaffold"
+    "scaffold",
+    "mcp",
+    "mcp-servers",
+    "ai",
+    "agent-skills"
   ],
   "author": "Dave",
   "license": "MIT",

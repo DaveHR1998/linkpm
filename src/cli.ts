@@ -20,6 +20,18 @@ import { DependencyResolver } from './resolver/index.js';
 import { runScript, execBin, runDlx } from './scripts/index.js';
 import { LinkPMError } from './utils/errors.js';
 import { preparePatch, commitPatch } from './patches/index.js';
+import {
+  runWorkspaceScript,
+  findWorkspaceRoot,
+  discoverWorkspacePackages,
+  linkWorkspaceDependencies
+} from './workspaces/index.js';
+import {
+  scanAndSyncAllAICapabilities,
+  printAICapabilities,
+  readProjectAIRegistry,
+  removeAICapabilityFromConfigs
+} from './ai/index.js';
 
 const cli = cac('linkpm');
 
@@ -82,7 +94,8 @@ cli
   .option('-P, --preset <presetName>', 'Specify a preset to install')
   .option('--offline', 'Force offline mode (use only cached packages)')
   .option('--prefer-offline', 'Prefer cached packages in store if available')
-  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean }) => {
+  .option('--ai', 'Enable automatic AI capability discovery (MCP servers, agent skills)')
+  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; ai?: boolean }) => {
     const projectRoot = findProjectRoot();
 
     // If --preset was passed
@@ -617,7 +630,57 @@ cli
     console.log(pc.dim('The patch has been applied directly to your active installation.\n'));
   });
 
+// 23. AI COMMAND
+cli
+  .command('ai [action] [target]', 'Manage project AI capabilities (list, sync, add, remove)')
+  .action(async (action: string = 'list', target?: string) => {
+    const projectRoot = findProjectRoot();
+    const act = action.toLowerCase();
+
+    if (act === 'list' || act === 'ls') {
+      const registry = readProjectAIRegistry(projectRoot);
+      printAICapabilities(registry);
+      return;
+    }
+
+    if (act === 'sync') {
+      console.log(pc.bold(pc.blue('⚡ linkpm ai sync:')) + ' Scanning node_modules for AI capabilities and MCP servers...');
+      const res = scanAndSyncAllAICapabilities(projectRoot);
+      console.log(pc.green(`✔ Scanned ${res.packagesScanned} package(s). Found ${res.aiPackagesFound} AI-capable package(s).`));
+      console.log(`  Active MCP Servers:  ${pc.bold(res.serversCount.toString())}`);
+      console.log(`  Active Agent Skills: ${pc.bold(res.skillsCount.toString())}`);
+      console.log(pc.dim('Synchronized to .cursor/mcp.json, mcp_config.json, and .agents/skills/\n'));
+      return;
+    }
+
+    if (act === 'add') {
+      if (!target) {
+        console.log(pc.yellow('Please specify a package name to add. Example: linkpm ai add @modelcontextprotocol/server-postgres'));
+        return;
+      }
+      console.log(pc.bold(pc.blue('⚡ linkpm ai add:')) + ` Installing ${pc.cyan(target)} and auto-wiring AI capabilities...`);
+      await installPackages([target], projectRoot, { ai: true });
+      const registry = readProjectAIRegistry(projectRoot);
+      printAICapabilities(registry);
+      return;
+    }
+
+    if (act === 'remove' || act === 'rm') {
+      if (!target) {
+        console.log(pc.yellow('Please specify a capability or package name to remove.'));
+        return;
+      }
+      const res = removeAICapabilityFromConfigs(projectRoot, target);
+      console.log(pc.green(`✔ Removed AI capability: ${target}`));
+      if (res.removedServers.length > 0) console.log(`  Unregistered MCP servers: ${res.removedServers.join(', ')}`);
+      if (res.removedSkills.length > 0) console.log(`  Unregistered skills: ${res.removedSkills.join(', ')}`);
+      return;
+    }
+
+    console.log(pc.yellow(`Unknown AI action "${action}". Available: list, sync, add, remove.`));
+  });
+
 cli.help();
-cli.version('1.0.1');
+cli.version('1.0.2');
 
 cli.parse();

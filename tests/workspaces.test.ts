@@ -26,8 +26,8 @@ packages:
   - 'components/**'
 `);
 
-  const globs = parsePnpmWorkspaceYaml(yamlPath);
-  assert.deepEqual(globs, ['packages/*', 'apps/*', 'components/**']);
+  const parsed = parsePnpmWorkspaceYaml(yamlPath);
+  assert.deepEqual(parsed.globs, ['packages/*', 'apps/*', 'components/**']);
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

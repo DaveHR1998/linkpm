@@ -53,8 +53,7 @@ function copyFrontendAssets(targetDir: string): void {
     path.resolve(thisDir, '../linkpm.png'),
     path.resolve(thisDir, '../../linkpm.png'),
     path.resolve(thisDir, 'linkpm.png'),
-    path.resolve(process.cwd(), 'linkpm.png'),
-    'C:\\Users\\daveH\\Desktop\\xnpm\\linkpm.png'
+    path.resolve(process.cwd(), 'linkpm.png')
   ];
 
   for (const src of candidates) {

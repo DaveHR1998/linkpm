@@ -236,6 +236,33 @@ linkpm audit
 
 ---
 
+### 8. AI Capability Discovery & Agent Tooling (MCP & Skills)
+
+LinkPM is the first package manager with native awareness of **Model Context Protocol (MCP)** servers and **Agent Skills**:
+
+```bash
+# Add an MCP server package with automatic AI capability discovery and IDE auto-wiring
+linkpm add @modelcontextprotocol/server-postgres --ai
+
+# List all active MCP servers and Agent Skills registered in the current project
+linkpm ai list
+
+# Scan existing node_modules/ for AI capabilities and sync with IDE configs
+linkpm ai sync
+
+# Remove an AI capability and clean up MCP configs and skill junctions
+linkpm ai remove @modelcontextprotocol/server-postgres
+```
+
+**Auto-Synchronized Configurations**:
+When an AI-capable package is installed, LinkPM discovers its declared contracts (`package.json.ai`, `mcp.json`, or `@modelcontextprotocol/*`) and automatically writes and maintains links in:
+- `.cursor/mcp.json` (Cursor IDE)
+- `mcp_config.json` (Antigravity IDE & Gemini)
+- `.agents/skills/` (Workspace Agent Skills)
+- `.linkpm/ai.json` (Deterministic Project AI Registry)
+
+---
+
 ## 🏗️ Technical Architecture
 
 ```

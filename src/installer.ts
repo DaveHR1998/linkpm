@@ -28,6 +28,7 @@ import {
 } from './lockfile/index.js';
 import { findPreset } from './presets.js';
 import { LinkPMError } from './utils/errors.js';
+import { registerAICapabilities, removeAICapabilityFromConfigs } from './ai/index.js';
 
 export interface InstallOptions extends ResolveOptions {
   dev?: boolean;
@@ -35,6 +36,7 @@ export interface InstallOptions extends ResolveOptions {
   noPrune?: boolean;
   ignoreScripts?: boolean;
   allowAllScripts?: boolean;
+  ai?: boolean;
 }
 
 export interface InstallResult {
@@ -47,6 +49,7 @@ export interface InstallResult {
   binsLinked: string[];
   depsCount?: number;
   dependencies?: Record<string, string>;
+  aiCapabilities?: { servers: string[]; skills: string[] };
 }
 
 export function isMatchingPlatform(pkgName: string): boolean {
@@ -100,7 +103,7 @@ export async function ensurePackageInStore(
     try {
       const patchContent = fs.readFileSync(patchFile, 'utf-8');
       effectiveVersion = `${resolved.version}_patch_${computePatchHash(patchContent)}`;
-    } catch {}
+    } catch { }
   }
 
   const alreadyInStore = isPackageInStore(resolved.name, effectiveVersion);
@@ -196,6 +199,18 @@ export async function installSinglePackage(
   // Link top-level package into project's node_modules/ pointing to isolated virtual package link
   const linkRes = linkPackage(projectRoot, resolved.name, virtualLinkPath || storeDir);
 
+  // Discover and register AI capabilities (MCP servers, Agent skills)
+  let aiCapabilities: { servers: string[]; skills: string[] } | undefined;
+  try {
+    const aiRes = registerAICapabilities(projectRoot, storeDir, resolved.name);
+    if (aiRes.capability.hasCapabilities) {
+      aiCapabilities = {
+        servers: aiRes.serversRegistered,
+        skills: aiRes.skillsRegistered
+      };
+    }
+  } catch { }
+
   return {
     name: resolved.name,
     version: resolved.version,
@@ -205,7 +220,8 @@ export async function installSinglePackage(
     fromStore,
     binsLinked: linkRes.binsLinked,
     depsCount: depsLinked,
-    dependencies: resolved.dependencies
+    dependencies: resolved.dependencies,
+    aiCapabilities
   };
 }
 
@@ -230,9 +246,12 @@ export async function installPackages(
       const cacheTag = res.fromStore ? pc.green('[cached]') : pc.cyan('[downloaded]');
       const binTag = res.binsLinked.length > 0 ? pc.dim(` (bin: ${res.binsLinked.join(', ')})`) : '';
       const depsTag = res.depsCount && res.depsCount > 0 ? pc.dim(` (isolated ${res.depsCount} deps)`) : '';
+      const aiTag = res.aiCapabilities && (res.aiCapabilities.servers.length > 0 || res.aiCapabilities.skills.length > 0)
+        ? pc.bold(pc.magenta(` [AI: ${[...res.aiCapabilities.servers, ...res.aiCapabilities.skills].join(', ')}]`))
+        : '';
 
       console.log(
-        `  ${pc.bold(pc.green('✔'))} ${pc.bold(res.name)}${pc.dim(`@${res.version}`)} ${cacheTag}${binTag}${depsTag} ${pc.dim(`${elapsed}ms`)}`
+        `  ${pc.bold(pc.green('✔'))} ${pc.bold(res.name)}${pc.dim(`@${res.version}`)} ${cacheTag}${binTag}${depsTag}${aiTag} ${pc.dim(`${elapsed}ms`)}`
       );
       results.push(res);
     } catch (err: any) {
@@ -241,7 +260,7 @@ export async function installPackages(
       for (const r of results) {
         try {
           unlinkPackage(projectRoot, r.name);
-        } catch {}
+        } catch { }
       }
       throw err;
     }
@@ -283,6 +302,14 @@ export async function uninstallPackages(
     } else {
       console.log(`  ${pc.dim('ℹ')} ${name} was not linked in node_modules`);
     }
+
+    // Remove associated AI capabilities if any
+    try {
+      const aiCleaned = removeAICapabilityFromConfigs(projectRoot, name);
+      if (aiCleaned.removedServers.length > 0 || aiCleaned.removedSkills.length > 0) {
+        console.log(`  ${pc.dim('🤖 Cleaned AI capabilities:')} ${[...aiCleaned.removedServers, ...aiCleaned.removedSkills].join(', ')}`);
+      }
+    } catch { }
   }
 
   // Remove from package.json
@@ -331,7 +358,7 @@ export function pruneExtraneousDependencies(projectRoot: string): string[] {
           if (fs.readdirSync(scopeDir).length === 0) {
             fs.rmdirSync(scopeDir);
           }
-        } catch {}
+        } catch { }
       }
     } else {
       if (!declared.has(entry.name)) {

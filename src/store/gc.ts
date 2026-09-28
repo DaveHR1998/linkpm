@@ -228,7 +228,7 @@ export function runGarbageCollection(options: GCOptions = {}): GCResult {
           let packageAgeMs = Infinity;
           try {
             const stat = fs.statSync(dirPath);
-            const lastActive = Math.max(stat.mtimeMs || 0, stat.ctimeMs || 0, stat.birthtimeMs || 0);
+            const lastActive = stat.mtimeMs || stat.ctimeMs || 0;
             packageAgeMs = now - lastActive;
           } catch {}
 

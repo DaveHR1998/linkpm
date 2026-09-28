@@ -680,7 +680,17 @@ cli
     console.log(pc.yellow(`Unknown AI action "${action}". Available: list, sync, add, remove.`));
   });
 
+const getCliVersion = (): string => {
+  try {
+    const pkgPath = new URL('../package.json', import.meta.url);
+    const data = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    return data.version || '1.0.3';
+  } catch {
+    return '1.0.3';
+  }
+};
+
 cli.help();
-cli.version('1.0.2');
+cli.version(getCliVersion());
 
 cli.parse();

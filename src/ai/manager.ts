@@ -9,33 +9,95 @@ import {
   syncToIDEConfigs,
   ProjectAIRegistry
 } from './config.js';
+import {
+  promptAIApproval,
+  computeMCPServerHash,
+  ApprovalOptions
+} from './approval.js';
 
 export interface RegisterAIResult {
   packageName: string;
   serversRegistered: string[];
   skillsRegistered: string[];
   capability: AICapability;
+  approved: boolean;
 }
 
 /**
  * Discovers and registers AI capabilities from a package into the project.
+ * Strictly requires approval confirmation and pins approved command hashes.
  */
-export function registerAICapabilities(
+export async function registerAICapabilities(
   projectRoot: string,
   packageDir: string,
-  packageName?: string
-): RegisterAIResult {
+  packageName?: string,
+  options: ApprovalOptions = {}
+): Promise<RegisterAIResult> {
   const capability = detectAICapabilities(packageDir, packageName);
+  const emptyRes: RegisterAIResult = {
+    packageName: capability.packageName,
+    serversRegistered: [],
+    skillsRegistered: [],
+    capability,
+    approved: false
+  };
+
+  if (!capability.hasCapabilities) {
+    return emptyRes;
+  }
+
   const registry = readProjectAIRegistry(projectRoot);
+
+  // Check if capability is already approved with identical hashes
+  let needsApproval = false;
+  for (const [serverName, serverConf] of Object.entries(capability.mcpServers)) {
+    const existing = registry.servers[serverName];
+    const currentHash = computeMCPServerHash({
+      name: serverName,
+      command: serverConf.command,
+      args: serverConf.args,
+      version: capability.version
+    });
+
+    if (!existing || existing.approvedHash !== currentHash) {
+      needsApproval = true;
+      break;
+    }
+  }
+
+  // If skills exist and not registered yet
+  for (const skill of capability.skills) {
+    if (!registry.skills[skill.name]) {
+      needsApproval = true;
+      break;
+    }
+  }
+
+  if (needsApproval) {
+    const isApproved = await promptAIApproval(capability.packageName, capability, options);
+    if (!isApproved) {
+      return emptyRes;
+    }
+  }
 
   const serversRegistered: string[] = [];
   const skillsRegistered: string[] = [];
 
-  // Register MCP servers
+  // Register MCP servers with approval metadata and hash pinning
   for (const [serverName, serverConf] of Object.entries(capability.mcpServers)) {
+    const currentHash = computeMCPServerHash({
+      name: serverName,
+      command: serverConf.command,
+      args: serverConf.args,
+      version: capability.version
+    });
+
     registry.servers[serverName] = {
       ...serverConf,
-      packageName: capability.packageName
+      packageName: capability.packageName,
+      version: capability.version,
+      approvedHash: currentHash,
+      approvedAt: new Date().toISOString()
     };
     serversRegistered.push(serverName);
   }
@@ -50,27 +112,29 @@ export function registerAICapabilities(
     skillsRegistered.push(skill.name);
   }
 
-  if (capability.hasCapabilities) {
-    writeProjectAIRegistry(projectRoot, registry);
-  }
+  writeProjectAIRegistry(projectRoot, registry);
 
   return {
     packageName: capability.packageName,
     serversRegistered,
     skillsRegistered,
-    capability
+    capability,
+    approved: true
   };
 }
 
 /**
  * Scans all installed packages in node_modules and registers any discovered AI capabilities.
  */
-export function scanAndSyncAllAICapabilities(projectRoot: string): {
+export async function scanAndSyncAllAICapabilities(
+  projectRoot: string,
+  options: ApprovalOptions = {}
+): Promise<{
   packagesScanned: number;
   aiPackagesFound: number;
   serversCount: number;
   skillsCount: number;
-} {
+}> {
   const nmDir = path.join(projectRoot, 'node_modules');
   if (!fs.existsSync(nmDir)) {
     return { packagesScanned: 0, aiPackagesFound: 0, serversCount: 0, skillsCount: 0 };
@@ -92,16 +156,16 @@ export function scanAndSyncAllAICapabilities(projectRoot: string): {
             packagesScanned++;
             const fullPkgName = `${entry.name}/${scopedEntry.name}`;
             const pkgDir = path.join(scopeDir, scopedEntry.name);
-            const res = registerAICapabilities(projectRoot, pkgDir, fullPkgName);
-            if (res.capability.hasCapabilities) aiPackagesFound++;
+            const res = await registerAICapabilities(projectRoot, pkgDir, fullPkgName, options);
+            if (res.approved && res.capability.hasCapabilities) aiPackagesFound++;
           }
         }
       }
     } else if (entry.isDirectory()) {
       packagesScanned++;
       const pkgDir = path.join(nmDir, entry.name);
-      const res = registerAICapabilities(projectRoot, pkgDir, entry.name);
-      if (res.capability.hasCapabilities) aiPackagesFound++;
+      const res = await registerAICapabilities(projectRoot, pkgDir, entry.name, options);
+      if (res.approved && res.capability.hasCapabilities) aiPackagesFound++;
     }
   }
 

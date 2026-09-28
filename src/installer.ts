@@ -37,6 +37,8 @@ export interface InstallOptions extends ResolveOptions {
   ignoreScripts?: boolean;
   allowAllScripts?: boolean;
   ai?: boolean;
+  yes?: boolean;
+  interactive?: boolean;
 }
 
 export interface InstallResult {
@@ -154,7 +156,7 @@ export async function ensurePackageInStore(
           nextVisited.add(depKey);
           nextVisited.add(resolved.name);
 
-          const depResult = await ensurePackageInStore(`${dep.name}@${dep.range}`, options, nextVisited);
+          const depResult = await ensurePackageInStore(`${dep.name}@${dep.range}`, { ...options, ai: false }, nextVisited);
           resolvedDeps[dep.name] = (depResult as any).virtualLinkPath || depResult.storeDir;
           depsLinked++;
         } catch {
@@ -199,17 +201,22 @@ export async function installSinglePackage(
   // Link top-level package into project's node_modules/ pointing to isolated virtual package link
   const linkRes = linkPackage(projectRoot, resolved.name, virtualLinkPath || storeDir);
 
-  // Discover and register AI capabilities (MCP servers, Agent skills)
+  // Discover and register AI capabilities ONLY IF explicitly opted-in via options.ai
   let aiCapabilities: { servers: string[]; skills: string[] } | undefined;
-  try {
-    const aiRes = registerAICapabilities(projectRoot, storeDir, resolved.name);
-    if (aiRes.capability.hasCapabilities) {
-      aiCapabilities = {
-        servers: aiRes.serversRegistered,
-        skills: aiRes.skillsRegistered
-      };
-    }
-  } catch { }
+  if (options.ai) {
+    try {
+      const aiRes = await registerAICapabilities(projectRoot, storeDir, resolved.name, {
+        interactive: options.interactive,
+        yes: options.yes
+      });
+      if (aiRes.approved && aiRes.capability.hasCapabilities) {
+        aiCapabilities = {
+          servers: aiRes.serversRegistered,
+          skills: aiRes.skillsRegistered
+        };
+      }
+    } catch { }
+  }
 
   return {
     name: resolved.name,

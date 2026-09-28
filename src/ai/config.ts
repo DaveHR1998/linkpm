@@ -63,10 +63,26 @@ export function syncToIDEConfigs(projectRoot: string, registry: ProjectAIRegistr
   const mcpServersMap: Record<string, any> = {};
 
   for (const [serverName, server] of Object.entries(registry.servers)) {
+    // Sanitize env: never copy shell secrets or ambient process.env values into configs
+    let sanitizedEnv: Record<string, string> | undefined;
+    if (server.env && typeof server.env === 'object') {
+      sanitizedEnv = {};
+      for (const [k, v] of Object.entries(server.env)) {
+        if (typeof v === 'string') {
+          // Never leak actual secret values from process.env into IDE config files
+          if (process.env[k] && v === process.env[k] && v.length > 3) {
+            sanitizedEnv[k] = `YOUR_${k}_HERE`;
+          } else {
+            sanitizedEnv[k] = v;
+          }
+        }
+      }
+    }
+
     mcpServersMap[serverName] = {
       command: server.command,
       args: server.args,
-      ...(server.env ? { env: server.env } : {})
+      ...(sanitizedEnv && Object.keys(sanitizedEnv).length > 0 ? { env: sanitizedEnv } : {})
     };
   }
 

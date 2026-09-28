@@ -127,7 +127,7 @@ Analyze the code.
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test('AI Registration & Sync: synchronizes to .cursor/mcp.json and mcp_config.json', () => {
+test('AI Registration & Sync: synchronizes to .cursor/mcp.json and mcp_config.json', async () => {
   const tmpProject = path.join(os.tmpdir(), `linkpm-ai-proj-${Date.now()}`);
   const fakePkgDir = path.join(os.tmpdir(), `linkpm-ai-pkg-${Date.now()}`);
 
@@ -143,14 +143,16 @@ test('AI Registration & Sync: synchronizes to .cursor/mcp.json and mcp_config.js
     })
   );
 
-  // Register capabilities
-  const res = registerAICapabilities(tmpProject, fakePkgDir, '@modelcontextprotocol/server-postgres');
+  // Register capabilities with explicit approval
+  const res = await registerAICapabilities(tmpProject, fakePkgDir, '@modelcontextprotocol/server-postgres', { yes: true });
   assert.equal(res.capability.hasCapabilities, true);
+  assert.equal(res.approved, true);
   assert.ok(res.serversRegistered.includes('server-postgres'));
 
   // 1. Verify .linkpm/ai.json
   const registry = readProjectAIRegistry(tmpProject);
   assert.ok(registry.servers['server-postgres']);
+  assert.ok(registry.servers['server-postgres'].approvedHash);
 
   // 2. Verify .cursor/mcp.json
   const cursorFile = path.join(tmpProject, '.cursor', 'mcp.json');
@@ -178,7 +180,7 @@ test('AI Registration & Sync: synchronizes to .cursor/mcp.json and mcp_config.js
   fs.rmSync(fakePkgDir, { recursive: true, force: true });
 });
 
-test('AI Scan & Sync: scans node_modules and discovers multiple AI packages', () => {
+test('AI Scan & Sync: scans node_modules and discovers multiple AI packages', async () => {
   const tmpProject = path.join(os.tmpdir(), `linkpm-ai-scan-${Date.now()}`);
   const nm = path.join(tmpProject, 'node_modules');
 
@@ -199,7 +201,7 @@ test('AI Scan & Sync: scans node_modules and discovers multiple AI packages', ()
     version: '4.17.21'
   }));
 
-  const scanRes = scanAndSyncAllAICapabilities(tmpProject);
+  const scanRes = await scanAndSyncAllAICapabilities(tmpProject, { yes: true });
   assert.equal(scanRes.packagesScanned, 2);
   assert.equal(scanRes.aiPackagesFound, 1);
   assert.equal(scanRes.serversCount, 1);
@@ -209,3 +211,118 @@ test('AI Scan & Sync: scans node_modules and discovers multiple AI packages', ()
 
   fs.rmSync(tmpProject, { recursive: true, force: true });
 });
+
+test('Security: AI wiring is strictly opt-in and non-interactive environment without --yes declines registration', async () => {
+  const tmpProject = path.join(os.tmpdir(), `linkpm-ai-sec-${Date.now()}`);
+  const fakePkgDir = path.join(os.tmpdir(), `linkpm-ai-fake-${Date.now()}`);
+
+  fs.mkdirSync(tmpProject, { recursive: true });
+  fs.mkdirSync(fakePkgDir, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(fakePkgDir, 'package.json'),
+    JSON.stringify({
+      name: 'evil-mcp',
+      version: '1.0.0',
+      keywords: ['mcp'],
+      bin: { 'evil-mcp': 'attack.js' }
+    })
+  );
+
+  // Without --yes and in non-interactive mode: must NOT register
+  const res = await registerAICapabilities(tmpProject, fakePkgDir, 'evil-mcp', { interactive: false, yes: false });
+  assert.equal(res.approved, false);
+  assert.equal(res.serversRegistered.length, 0);
+
+  // Verify IDE files were NOT created or modified
+  const cursorFile = path.join(tmpProject, '.cursor', 'mcp.json');
+  const rootMcpFile = path.join(tmpProject, 'mcp_config.json');
+  assert.equal(fs.existsSync(cursorFile), false);
+  assert.equal(fs.existsSync(rootMcpFile), false);
+
+  fs.rmSync(tmpProject, { recursive: true, force: true });
+  fs.rmSync(fakePkgDir, { recursive: true, force: true });
+});
+
+test('Security: Cryptographic approval pinning stores hash and prevents unapproved modifications', async () => {
+  const tmpProject = path.join(os.tmpdir(), `linkpm-ai-pin-${Date.now()}`);
+  const fakePkgDir = path.join(os.tmpdir(), `linkpm-ai-pinpkg-${Date.now()}`);
+
+  fs.mkdirSync(tmpProject, { recursive: true });
+  fs.mkdirSync(fakePkgDir, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(fakePkgDir, 'package.json'),
+    JSON.stringify({
+      name: 'safe-mcp',
+      version: '1.0.0',
+      bin: { 'safe-mcp': 'index.js' }
+    })
+  );
+
+  // 1. Initial approved registration
+  const res = await registerAICapabilities(tmpProject, fakePkgDir, 'safe-mcp', { yes: true });
+  assert.equal(res.approved, true);
+
+  const reg = readProjectAIRegistry(tmpProject);
+  const initialHash = reg.servers['safe']?.approvedHash;
+  assert.ok(initialHash);
+
+  // 2. Tampering simulation: version updates or binary target changes
+  fs.writeFileSync(
+    path.join(fakePkgDir, 'package.json'),
+    JSON.stringify({
+      name: 'safe-mcp',
+      version: '2.0.0',
+      bin: { 'safe-mcp': 'tampered-evil.js' }
+    })
+  );
+
+  // Re-registering without approval must be declined because hash changed
+  const tamperedRes = await registerAICapabilities(tmpProject, fakePkgDir, 'safe-mcp', { interactive: false, yes: false });
+  assert.equal(tamperedRes.approved, false);
+
+  fs.rmSync(tmpProject, { recursive: true, force: true });
+  fs.rmSync(fakePkgDir, { recursive: true, force: true });
+});
+
+test('Security: syncToIDEConfigs sanitizes environment variables and never leaks host secrets', () => {
+  const tmpProject = path.join(os.tmpdir(), `linkpm-ai-secenv-${Date.now()}`);
+  fs.mkdirSync(tmpProject, { recursive: true });
+
+  const fakeSecretKey = 'MY_SUPER_SECRET_TOKEN_XYZ';
+  process.env[fakeSecretKey] = 'super-secret-12345-value';
+
+  try {
+    const registry: any = {
+      version: 1,
+      servers: {
+        'secure-mcp': {
+          packageName: 'secure-mcp',
+          command: 'node',
+          args: ['index.js'],
+          env: {
+            [fakeSecretKey]: 'super-secret-12345-value',
+            'NORMAL_SETTING': 'debug'
+          }
+        }
+      },
+      skills: {}
+    };
+
+    writeProjectAIRegistry(tmpProject, registry);
+
+    const cursorFile = path.join(tmpProject, '.cursor', 'mcp.json');
+    assert.ok(fs.existsSync(cursorFile));
+    const cursorData = JSON.parse(fs.readFileSync(cursorFile, 'utf-8'));
+    const serverConf = cursorData.mcpServers['secure-mcp'];
+
+    // Verify secret was replaced by placeholder and not leaked
+    assert.equal(serverConf.env[fakeSecretKey], `YOUR_${fakeSecretKey}_HERE`);
+    assert.equal(serverConf.env['NORMAL_SETTING'], 'debug');
+  } finally {
+    delete process.env[fakeSecretKey];
+    fs.rmSync(tmpProject, { recursive: true, force: true });
+  }
+});
+

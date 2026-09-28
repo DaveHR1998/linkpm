@@ -95,7 +95,8 @@ cli
   .option('--offline', 'Force offline mode (use only cached packages)')
   .option('--prefer-offline', 'Prefer cached packages in store if available')
   .option('--ai', 'Enable automatic AI capability discovery (MCP servers, agent skills)')
-  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; ai?: boolean }) => {
+  .option('-y, --yes', 'Automatically confirm prompts without interactive questions')
+  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; ai?: boolean; yes?: boolean }) => {
     const projectRoot = findProjectRoot();
 
     // If --preset was passed
@@ -633,7 +634,8 @@ cli
 // 23. AI COMMAND
 cli
   .command('ai [action] [target]', 'Manage project AI capabilities (list, sync, add, remove)')
-  .action(async (action: string = 'list', target?: string) => {
+  .option('-y, --yes', 'Automatically confirm prompts without interactive questions')
+  .action(async (action: string = 'list', target?: string, options: { yes?: boolean } = {}) => {
     const projectRoot = findProjectRoot();
     const act = action.toLowerCase();
 
@@ -645,7 +647,7 @@ cli
 
     if (act === 'sync') {
       console.log(pc.bold(pc.blue('⚡ linkpm ai sync:')) + ' Scanning node_modules for AI capabilities and MCP servers...');
-      const res = scanAndSyncAllAICapabilities(projectRoot);
+      const res = await scanAndSyncAllAICapabilities(projectRoot, { yes: Boolean(options.yes) });
       console.log(pc.green(`✔ Scanned ${res.packagesScanned} package(s). Found ${res.aiPackagesFound} AI-capable package(s).`));
       console.log(`  Active MCP Servers:  ${pc.bold(res.serversCount.toString())}`);
       console.log(`  Active Agent Skills: ${pc.bold(res.skillsCount.toString())}`);
@@ -659,7 +661,7 @@ cli
         return;
       }
       console.log(pc.bold(pc.blue('⚡ linkpm ai add:')) + ` Installing ${pc.cyan(target)} and auto-wiring AI capabilities...`);
-      await installPackages([target], projectRoot, { ai: true });
+      await installPackages([target], projectRoot, { ai: true, yes: Boolean(options.yes) });
       const registry = readProjectAIRegistry(projectRoot);
       printAICapabilities(registry);
       return;

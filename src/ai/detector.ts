@@ -10,6 +10,9 @@ export interface MCPServerConfig {
   tools?: string[];
   type?: 'stdio' | 'sse';
   url?: string;
+  version?: string;
+  approvedHash?: string;
+  approvedAt?: string;
 }
 
 export interface AgentSkillManifest {

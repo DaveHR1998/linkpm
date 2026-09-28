@@ -24,10 +24,25 @@ export function buildScriptEnv(projectRoot: string, options: ScriptEnvOptions = 
   const existingPath = process.env.PATH || process.env.Path || '';
   const newPath = [...binDirs, existingPath].filter(Boolean).join(path.delimiter);
 
+  const existingNodeOptions = process.env.NODE_OPTIONS || '';
+  const nodeOptionsList = existingNodeOptions.split(/\s+/).filter(Boolean);
+  if (!nodeOptionsList.includes('--preserve-symlinks')) {
+    nodeOptionsList.push('--preserve-symlinks');
+  }
+  if (!nodeOptionsList.includes('--preserve-symlinks-main')) {
+    nodeOptionsList.push('--preserve-symlinks-main');
+  }
+
+  const existingNodePath = process.env.NODE_PATH || '';
+  const projectNm = path.join(path.resolve(projectRoot), 'node_modules');
+  const nodePathList = [projectNm, existingNodePath].filter(Boolean).join(path.delimiter);
+
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: newPath,
     Path: newPath,
+    NODE_OPTIONS: nodeOptionsList.join(' '),
+    NODE_PATH: nodePathList,
     INIT_CWD: process.cwd(),
     npm_config_user_agent: 'linkpm/1.0.1 node/' + process.version + ' ' + process.platform + ' ' + process.arch,
     npm_execpath: process.argv[1] || 'linkpm'

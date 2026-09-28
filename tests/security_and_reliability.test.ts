@@ -303,5 +303,151 @@ describe('Security & Production Reliability Tests', () => {
       assert.strictEqual(fs.existsSync(pkgDir), false);
     });
   });
+
+  describe('10. Transitive Dependency Conflicts: Project-Isolated Virtual Store (.linkpm)', () => {
+    it('should isolate transitive dependencies per project without mutating or colliding in the global store', async () => {
+      const { createVirtualPackage } = await import('../src/linker/virtual-store.js');
+
+      // Shared Global Store
+      const storeRoot = path.join(tmpDir, 'shared-store');
+      const storePkgAlpha = path.join(storeRoot, 'pkg-alpha', '1.0.0');
+      const storeLodash4 = path.join(storeRoot, 'lodash', '4.17.21');
+      const storeLodash3 = path.join(storeRoot, 'lodash', '3.10.1');
+
+      fs.mkdirSync(storePkgAlpha, { recursive: true });
+      fs.writeFileSync(path.join(storePkgAlpha, 'package.json'), JSON.stringify({ name: 'pkg-alpha', version: '1.0.0' }));
+      fs.writeFileSync(path.join(storePkgAlpha, 'index.js'), 'module.exports = "pkg-alpha-1.0.0";');
+
+      fs.mkdirSync(storeLodash4, { recursive: true });
+      fs.writeFileSync(path.join(storeLodash4, 'package.json'), JSON.stringify({ name: 'lodash', version: '4.17.21' }));
+      fs.writeFileSync(path.join(storeLodash4, 'index.js'), 'module.exports = "lodash-4";');
+
+      fs.mkdirSync(storeLodash3, { recursive: true });
+      fs.writeFileSync(path.join(storeLodash3, 'package.json'), JSON.stringify({ name: 'lodash', version: '3.10.1' }));
+      fs.writeFileSync(path.join(storeLodash3, 'index.js'), 'module.exports = "lodash-3";');
+
+      // Project A uses pkg-alpha with lodash@4
+      const projectA = path.join(tmpDir, 'project-a');
+      fs.mkdirSync(projectA, { recursive: true });
+      fs.writeFileSync(path.join(projectA, 'package.json'), JSON.stringify({ name: 'project-a' }));
+
+      const resA = createVirtualPackage({
+        projectRoot: projectA,
+        name: 'pkg-alpha',
+        version: '1.0.0',
+        storeDir: storePkgAlpha,
+        dependencies: {
+          lodash: storeLodash4
+        }
+      });
+
+      // Project B uses pkg-alpha with lodash@3
+      const projectB = path.join(tmpDir, 'project-b');
+      fs.mkdirSync(projectB, { recursive: true });
+      fs.writeFileSync(path.join(projectB, 'package.json'), JSON.stringify({ name: 'project-b' }));
+
+      const resB = createVirtualPackage({
+        projectRoot: projectB,
+        name: 'pkg-alpha',
+        version: '1.0.0',
+        storeDir: storePkgAlpha,
+        dependencies: {
+          lodash: storeLodash3
+        }
+      });
+
+      // 1. Verify Project A's virtual store links lodash to v4
+      const projALodash = path.join(resA.virtualNodeModules, 'lodash', 'index.js');
+      assert.strictEqual(fs.existsSync(projALodash), true);
+      assert.strictEqual(fs.readFileSync(projALodash, 'utf-8'), 'module.exports = "lodash-4";');
+
+      // 2. Verify Project B's virtual store links lodash to v3
+      const projBLodash = path.join(resB.virtualNodeModules, 'lodash', 'index.js');
+      assert.strictEqual(fs.existsSync(projBLodash), true);
+      assert.strictEqual(fs.readFileSync(projBLodash, 'utf-8'), 'module.exports = "lodash-3";');
+
+      // 3. Verify the global store directory has NO node_modules subdirectory (100% clean and pure)
+      const storeNm = path.join(storePkgAlpha, 'node_modules');
+      assert.strictEqual(fs.existsSync(storeNm), false, 'Global store package must not contain a node_modules folder');
+    });
+  });
+
+  describe('11. Unmounted Drive GC Protection: 30-Day Retention Grace Period', () => {
+    it('should protect packages from unmounted drives and retain unreferenced packages within the 30-day grace period', async () => {
+      const { runGarbageCollection, registerProject, getRegisteredProjectRecords, PROJECTS_FILE } = await import('../src/store/gc.js');
+
+      // 1. Setup a fake project on an "external drive"
+      const fakeExternalProj = path.join(tmpDir, 'external-drive-e', 'my-repo');
+      fs.mkdirSync(fakeExternalProj, { recursive: true });
+      fs.writeFileSync(path.join(fakeExternalProj, 'linkpm-lock.json'), JSON.stringify({
+        lockfileVersion: 2,
+        packages: {
+          'unmounted-dep@1.2.0': { version: '1.2.0' }
+        }
+      }));
+
+      // Register the project while the "drive is mounted"
+      registerProject(fakeExternalProj);
+
+      // Verify it was saved with lockfile snapshot
+      const recordsBefore = getRegisteredProjectRecords();
+      const registered = recordsBefore.find(r => r.path === path.resolve(fakeExternalProj));
+      assert.ok(registered, 'Project should be registered');
+      assert.deepStrictEqual(registered.lockfilePackages, ['unmounted-dep@1.2.0']);
+
+      // 2. Setup central store with:
+      // - unmounted-dep@1.2.0 (belongs to the unmounted drive)
+      // - recent-unused@2.0.0 (unreferenced, but accessed 2 days ago -> within 30-day grace period)
+      // - ancient-unused@0.1.0 (unreferenced, accessed 45 days ago -> expired)
+      const storeDir = (await import('../src/config/index.js')).getStoreDir();
+
+      const pkgUnmounted = path.join(storeDir, 'unmounted-dep', '1.2.0');
+      fs.mkdirSync(pkgUnmounted, { recursive: true });
+      fs.writeFileSync(path.join(pkgUnmounted, 'package.json'), JSON.stringify({ name: 'unmounted-dep', version: '1.2.0' }));
+
+      const pkgRecent = path.join(storeDir, 'recent-unused', '2.0.0');
+      fs.mkdirSync(pkgRecent, { recursive: true });
+      fs.writeFileSync(path.join(pkgRecent, 'package.json'), JSON.stringify({ name: 'recent-unused', version: '2.0.0' }));
+      // Set timestamp to 2 days ago
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+      fs.utimesSync(pkgRecent, twoDaysAgo, twoDaysAgo);
+
+      const pkgAncient = path.join(storeDir, 'ancient-unused', '0.1.0');
+      fs.mkdirSync(pkgAncient, { recursive: true });
+      fs.writeFileSync(path.join(pkgAncient, 'package.json'), JSON.stringify({ name: 'ancient-unused', version: '0.1.0' }));
+      // Set timestamp to 45 days ago
+      const fortyFiveDaysAgo = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+      fs.utimesSync(pkgAncient, fortyFiveDaysAgo, fortyFiveDaysAgo);
+
+      // 3. Simulate "unmounting the drive" by deleting the directory
+      fs.rmSync(path.join(tmpDir, 'external-drive-e'), { recursive: true, force: true });
+      assert.strictEqual(fs.existsSync(fakeExternalProj), false, 'Drive is now unmounted');
+
+      // 4. Run Garbage Collection with standard 30-day retention
+      const gcResult = runGarbageCollection({ dryRun: false, retentionDays: 30 });
+
+      // Verify unmounted drive was protected
+      assert.ok(gcResult.unmountedProjects.includes(path.resolve(fakeExternalProj)), 'Unmounted project should be retained in grace period');
+      assert.strictEqual(fs.existsSync(pkgUnmounted), true, 'Package from unmounted drive must NOT be deleted');
+
+      // Verify recent package was protected by 30-day retention
+      assert.ok(gcResult.retainedGracePackages.includes('recent-unused@2.0.0'), 'Recent unused package should be retained in grace period');
+      assert.strictEqual(fs.existsSync(pkgRecent), true, 'Recent unused package must NOT be deleted');
+
+      // Verify ancient unused package was pruned
+      assert.ok(gcResult.prunedPackages.includes('ancient-unused@0.1.0'), 'Ancient unused package should be pruned');
+      assert.strictEqual(fs.existsSync(pkgAncient), false, 'Ancient unused package should be deleted');
+
+      // 5. Test force=true / retentionDays=0 bypasses grace period
+      const forceResult = runGarbageCollection({ dryRun: false, force: true });
+      assert.ok(forceResult.prunedPackages.includes('recent-unused@2.0.0'));
+      assert.strictEqual(fs.existsSync(pkgRecent), false, 'With force=true, grace period is bypassed and package is pruned');
+
+      // Clean up fake unmounted dep from store
+      try { fs.rmSync(path.join(storeDir, 'unmounted-dep'), { recursive: true, force: true }); } catch {}
+    });
+  });
 });
+
+
 

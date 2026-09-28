@@ -276,7 +276,9 @@ cli
 cli
   .command('store [action]', 'Manage central store (list, status, gc, clear, path)')
   .option('--dry-run', 'Simulate garbage collection without deleting any files')
-  .action(async (action: string = 'list', options: { dryRun?: boolean }) => {
+  .option('--days <number>', 'Retention grace period in days (default: 30)')
+  .option('--force, --all', 'Bypass grace period and prune all unreferenced packages immediately')
+  .action(async (action: string = 'list', options: { dryRun?: boolean; days?: string | number; force?: boolean; all?: boolean }) => {
     const act = action.toLowerCase();
 
     if (act === 'path') {
@@ -306,17 +308,26 @@ cli
 
     if (act === 'gc') {
       const dryRun = Boolean(options.dryRun);
-      console.log(pc.bold(pc.blue('🧹 linkpm store gc:')) + (dryRun ? pc.yellow(' [DRY RUN]') : ''));
-      console.log(pc.dim('Scanning active projects and unused store packages...'));
+      const force = Boolean(options.force || options.all);
+      const retentionDays = options.days !== undefined ? Number(options.days) : (force ? 0 : 30);
 
-      const result = runGarbageCollection({ dryRun });
+      console.log(pc.bold(pc.blue('🧹 linkpm store gc:')) + (dryRun ? pc.yellow(' [DRY RUN]') : ''));
+      console.log(pc.dim(`Scanning active projects, unmounted drives, and store packages (Grace Period: ${retentionDays} days)...`));
+
+      const result = runGarbageCollection({ dryRun, retentionDays, force });
       const freedMb = (result.freedBytes / (1024 * 1024)).toFixed(2);
 
-      console.log(`\n  Active Projects Tracked: ${pc.bold(result.activeProjects.length.toString())}`);
-      console.log(`  Store Packages Scanned:  ${pc.bold(result.totalStorePackages.toString())}`);
+      console.log(`\n  Active Projects Tracked:    ${pc.bold(result.activeProjects.length.toString())}`);
+      if (result.unmountedProjects.length > 0) {
+        console.log(`  Unmounted Projects (Grace): ${pc.yellow(result.unmountedProjects.length.toString())}`);
+      }
+      console.log(`  Store Packages Scanned:     ${pc.bold(result.totalStorePackages.toString())}`);
+      if (result.retainedGraceCount > 0) {
+        console.log(`  Retained in Grace Period:   ${pc.cyan(result.retainedGraceCount.toString())}`);
+      }
 
       if (result.prunedCount === 0) {
-        console.log(pc.green('\n✨ Central store is clean. No unreferenced packages to prune.'));
+        console.log(pc.green('\n✨ Central store is clean. No expired unreferenced packages to prune.'));
       } else {
         const actionWord = dryRun ? 'Would prune' : 'Pruned';
         console.log(pc.bold(pc.green(`\n✔ ${actionWord} ${result.prunedCount} unreferenced package(s), freeing ${freedMb} MB.`)));

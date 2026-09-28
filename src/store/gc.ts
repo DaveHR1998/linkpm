@@ -4,39 +4,82 @@ import { LINKPM_HOME, getStoreDir, safePackageName } from '../config/index.js';
 import { LOCKFILE_NAME, readLockfile } from '../lockfile/index.js';
 
 export const PROJECTS_FILE = path.join(LINKPM_HOME, 'projects.json');
+export const DEFAULT_RETENTION_DAYS = 30;
+export const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+export interface ProjectRecord {
+  path: string;
+  lastSeen: number;
+  lockfilePackages?: string[];
+}
 
 export interface GCOptions {
   dryRun?: boolean;
+  retentionDays?: number;
+  force?: boolean;
 }
 
 export interface GCResult {
   activeProjects: string[];
+  unmountedProjects: string[];
   totalStorePackages: number;
   prunedCount: number;
   prunedPackages: string[];
+  retainedGraceCount: number;
+  retainedGracePackages: string[];
   freedBytes: number;
+  retentionDays: number;
 }
 
 export function registerProject(projectRoot: string): void {
   try {
-    const list = getRegisteredProjects();
+    const records = getRegisteredProjectRecords();
     const resolved = path.resolve(projectRoot);
-    if (!list.includes(resolved)) {
-      list.push(resolved);
-      fs.writeFileSync(PROJECTS_FILE, JSON.stringify(list, null, 2), 'utf-8');
+    const existing = records.find(r => r.path === resolved);
+
+    // Snapshot lockfile packages if lockfile exists
+    let lockfilePackages: string[] | undefined;
+    const lock = readLockfile(resolved);
+    if (lock) {
+      lockfilePackages = Object.keys(lock.packages);
     }
+
+    if (existing) {
+      existing.lastSeen = Date.now();
+      if (lockfilePackages) {
+        existing.lockfilePackages = lockfilePackages;
+      }
+    } else {
+      records.push({
+        path: resolved,
+        lastSeen: Date.now(),
+        lockfilePackages
+      });
+    }
+
+    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(records, null, 2), 'utf-8');
   } catch {}
 }
 
-export function getRegisteredProjects(): string[] {
+export function getRegisteredProjectRecords(): ProjectRecord[] {
   try {
     if (!fs.existsSync(PROJECTS_FILE)) return [];
     const raw = fs.readFileSync(PROJECTS_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(item => {
+      if (typeof item === 'string') {
+        return { path: item, lastSeen: Date.now() };
+      }
+      return item;
+    });
   } catch {
     return [];
   }
+}
+
+export function getRegisteredProjects(): string[] {
+  return getRegisteredProjectRecords().map(r => r.path);
 }
 
 function getDirectorySize(dirPath: string, visited: Set<string> = new Set()): number {
@@ -100,27 +143,65 @@ function safeRemoveStorePackage(dirPath: string): void {
 }
 
 export function runGarbageCollection(options: GCOptions = {}): GCResult {
-  const registered = getRegisteredProjects();
-  const validProjects = registered.filter(p => fs.existsSync(p));
+  const retentionDays = options.force
+    ? 0
+    : (typeof options.retentionDays === 'number' ? options.retentionDays : DEFAULT_RETENTION_DAYS);
+  const retentionMs = retentionDays * MS_PER_DAY;
+  const now = Date.now();
 
-  // Update projects.json with still-existing projects
-  try {
-    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(validProjects, null, 2), 'utf-8');
-  } catch {}
-
-  // Collect all package@version keys referenced across all active projects
+  const records = getRegisteredProjectRecords();
+  const updatedRecords: ProjectRecord[] = [];
+  const activeProjects: string[] = [];
+  const unmountedProjects: string[] = [];
   const referencedKeys = new Set<string>();
 
-  for (const proj of validProjects) {
-    const lock = readLockfile(proj);
-    if (lock) {
-      for (const key of Object.keys(lock.packages)) {
-        referencedKeys.add(key);
+  for (const record of records) {
+    const exists = fs.existsSync(record.path);
+
+    if (exists) {
+      activeProjects.push(record.path);
+      record.lastSeen = now;
+      const lock = readLockfile(record.path);
+      if (lock) {
+        const pkgs = Object.keys(lock.packages);
+        record.lockfilePackages = pkgs;
+        for (const k of pkgs) {
+          referencedKeys.add(k);
+        }
+      } else if (record.lockfilePackages) {
+        for (const k of record.lockfilePackages) {
+          referencedKeys.add(k);
+        }
+      }
+      updatedRecords.push(record);
+    } else {
+      // Unmounted drive, disconnected USB/SSD, or temporarily inaccessible path
+      const ageMs = now - (record.lastSeen || 0);
+      const isWithinRetention = retentionDays > 0 && ageMs < retentionMs;
+
+      if (isWithinRetention) {
+        // Retain unmounted project in grace period!
+        unmountedProjects.push(record.path);
+        // Protect packages referenced in its last known lockfile snapshot!
+        if (record.lockfilePackages) {
+          for (const k of record.lockfilePackages) {
+            referencedKeys.add(k);
+          }
+        }
+        updatedRecords.push(record);
+      } else {
+        // Exceeded retention period: safely drop the abandoned project path
       }
     }
   }
 
+  // Update projects.json with active and grace-period-retained projects
+  try {
+    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(updatedRecords, null, 2), 'utf-8');
+  } catch {}
+
   const prunedPackages: string[] = [];
+  const retainedGracePackages: string[] = [];
   let freedBytes = 0;
   let totalStorePackages = 0;
 
@@ -140,16 +221,29 @@ export function runGarbageCollection(options: GCOptions = {}): GCResult {
       for (const vDir of versionDirs) {
         const version = vDir.name;
         const key = `${realName}@${version}`;
+        const dirPath = path.join(pkgDir, version);
 
-        // If not referenced by any project, prune it!
         if (!referencedKeys.has(key)) {
-          const dirToPrune = path.join(pkgDir, version);
-          const size = getDirectorySize(dirToPrune);
-          freedBytes += size;
-          prunedPackages.push(key);
+          // Check package age against retention grace period
+          let packageAgeMs = Infinity;
+          try {
+            const stat = fs.statSync(dirPath);
+            const lastActive = Math.max(stat.mtimeMs || 0, stat.ctimeMs || 0, stat.birthtimeMs || 0);
+            packageAgeMs = now - lastActive;
+          } catch {}
 
-          if (!options.dryRun) {
-            safeRemoveStorePackage(dirToPrune);
+          if (retentionDays > 0 && packageAgeMs < retentionMs) {
+            // Protected by 30-day retention grace period!
+            retainedGracePackages.push(key);
+          } else {
+            // Expired past grace period or force=true: safe to prune!
+            const size = getDirectorySize(dirPath);
+            freedBytes += size;
+            prunedPackages.push(key);
+
+            if (!options.dryRun) {
+              safeRemoveStorePackage(dirPath);
+            }
           }
         }
       }
@@ -164,10 +258,14 @@ export function runGarbageCollection(options: GCOptions = {}): GCResult {
   }
 
   return {
-    activeProjects: validProjects,
+    activeProjects,
+    unmountedProjects,
     totalStorePackages,
     prunedCount: prunedPackages.length,
     prunedPackages,
-    freedBytes
+    retainedGraceCount: retainedGracePackages.length,
+    retainedGracePackages,
+    freedBytes,
+    retentionDays
   };
 }

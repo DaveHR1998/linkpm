@@ -95,7 +95,6 @@ export async function extractToStore(
       }
 
       fs.renameSync(tempDir, targetDir);
-      linkToGlobalNodeModules(pkg.name, targetDir);
       runLifecycleScripts(targetDir, options);
       // Protect global store from in-place edits and store poisoning
       markStoreDirectoryReadOnly(targetDir);

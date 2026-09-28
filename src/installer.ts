@@ -7,11 +7,10 @@ import {
   extractToStore,
   getPackageStoreDir,
   computePatchHash,
-  linkToGlobalNodeModules,
-  linkDependencyIntoStorePackage,
   registerProject
 } from './store.js';
 import { linkPackage, unlinkPackage, type LinkResult } from './linker.js';
+import { createVirtualPackage } from './linker/virtual-store.js';
 import {
   addDependenciesToPackageJson,
   removeDependenciesFromPackageJson,
@@ -119,9 +118,6 @@ export async function ensurePackageInStore(
     });
   }
 
-  // Ensure global fallback in ~/.linkpm/node_modules/
-  linkToGlobalNodeModules(resolved.name, storeDir);
-
   let depsLinked = 0;
   const depsToProcess: Array<{ name: string; range: string }> = [];
 
@@ -139,7 +135,9 @@ export async function ensurePackageInStore(
     }
   }
 
-  // Batch process dependencies into storeDir/node_modules/
+  const resolvedDeps: Record<string, string> = {};
+
+  // Batch process dependencies into virtual store
   const BATCH_SIZE = 5;
   for (let i = 0; i < depsToProcess.length; i += BATCH_SIZE) {
     const batch = depsToProcess.slice(i, i + BATCH_SIZE);
@@ -154,7 +152,7 @@ export async function ensurePackageInStore(
           nextVisited.add(resolved.name);
 
           const depResult = await ensurePackageInStore(`${dep.name}@${dep.range}`, options, nextVisited);
-          linkDependencyIntoStorePackage(storeDir, dep.name, depResult.storeDir);
+          resolvedDeps[dep.name] = (depResult as any).virtualLinkPath || depResult.storeDir;
           depsLinked++;
         } catch {
           // ignore non-critical optional dependency failures
@@ -163,7 +161,22 @@ export async function ensurePackageInStore(
     );
   }
 
-  return { resolved, storeDir, fromStore: alreadyInStore, depsLinked };
+  // Create isolated virtual package mapping inside project's node_modules/.linkpm/
+  const virtualRes = createVirtualPackage({
+    projectRoot,
+    name: resolved.name,
+    version: effectiveVersion,
+    storeDir,
+    dependencies: resolvedDeps
+  });
+
+  return {
+    resolved,
+    storeDir,
+    virtualLinkPath: virtualRes.packageLinkPath,
+    fromStore: alreadyInStore,
+    depsLinked
+  };
 }
 
 export async function installSinglePackage(
@@ -178,10 +191,10 @@ export async function installSinglePackage(
     ...options
   };
 
-  const { resolved, storeDir, fromStore, depsLinked } = await ensurePackageInStore(spec, opts);
+  const { resolved, storeDir, virtualLinkPath, fromStore, depsLinked } = await ensurePackageInStore(spec, opts) as any;
 
-  // Link top-level package into project's node_modules/
-  const linkRes = linkPackage(projectRoot, resolved.name, storeDir);
+  // Link top-level package into project's node_modules/ pointing to isolated virtual package link
+  const linkRes = linkPackage(projectRoot, resolved.name, virtualLinkPath || storeDir);
 
   return {
     name: resolved.name,

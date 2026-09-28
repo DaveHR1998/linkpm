@@ -81,11 +81,14 @@ export function detectAICapabilities(packageDir: string, packageName?: string): 
     } catch {}
   }
 
-  // 3. Conventional MCP server: @modelcontextprotocol/* or package keyword "mcp-server"
+  // 3. Conventional MCP server: @modelcontextprotocol/*, name with mcp, keyword "mcp"/"mcp-server", or @modelcontextprotocol/sdk dependency
   const isMcpPackage =
     name.startsWith('@modelcontextprotocol/') ||
     name.startsWith('mcp-server-') ||
-    (Array.isArray(pkgJson.keywords) && pkgJson.keywords.includes('mcp-server'));
+    name.endsWith('-mcp') ||
+    name.includes('-mcp-') ||
+    (Array.isArray(pkgJson.keywords) && (pkgJson.keywords.includes('mcp-server') || pkgJson.keywords.includes('mcp'))) ||
+    Boolean(pkgJson.dependencies?.['@modelcontextprotocol/sdk'] || pkgJson.peerDependencies?.['@modelcontextprotocol/sdk']);
 
   if (isMcpPackage && Object.keys(mcpServers).length === 0) {
     const serverName = getSimplePackageName(name);
@@ -94,7 +97,7 @@ export function detectAICapabilities(packageDir: string, packageName?: string): 
     if (typeof pkgJson.bin === 'string') {
       targetScript = pkgJson.bin;
     } else if (pkgJson.bin && typeof pkgJson.bin === 'object') {
-      targetScript = pkgJson.bin[serverName] || Object.values(pkgJson.bin)[0] as string;
+      targetScript = pkgJson.bin[name] || pkgJson.bin[serverName] || Object.values(pkgJson.bin)[0] as string;
     } else if (pkgJson.main) {
       targetScript = pkgJson.main;
     }
@@ -188,7 +191,7 @@ function getSimplePackageName(pkgName: string): string {
     const parts = pkgName.split('/');
     return parts[1] || pkgName;
   }
-  return pkgName.replace(/^mcp-server-/, '');
+  return pkgName.replace(/^mcp-server-/, '').replace(/-mcp$/, '');
 }
 
 function parseSkillDescription(skillMdPath: string): string | undefined {

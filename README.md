@@ -43,6 +43,7 @@ LinkPM is engineered from the ground up for modern JavaScript and TypeScript dev
 | **Binary Execution** | Triple-shim generation (POSIX shell, Windows CMD, PowerShell) with `--preserve-symlinks` routing |
 | **Scaffolding & Presets** | Built-in presets, custom stack persistence (`~/.linkpm/presets.json`), and instant project creation |
 | **Diagnostics & Health** | Self-healing environment doctor (`linkpm doctor`), dependency tree, and audit scanning |
+| **AI & Agent Tooling** | Native MCP server discovery, Agent Skills linking, and multi-IDE auto-wiring (.cursor, mcp_config.json) |
 
 ---
 
@@ -238,28 +239,39 @@ linkpm audit
 
 ### 8. AI Capability Discovery & Agent Tooling (MCP & Skills)
 
-LinkPM is the first package manager with native awareness of **Model Context Protocol (MCP)** servers and **Agent Skills**:
+LinkPM is the first package manager with native, zero-config awareness of **Model Context Protocol (MCP)** servers and **Agent Skills**. It bridges the gap between JavaScript/TypeScript package distribution and AI agent execution environments:
 
 ```bash
-# Add an MCP server package with automatic AI capability discovery and IDE auto-wiring
+# 1. Install an AI package with automatic capability discovery and multi-IDE wiring:
+linkpm add notebooklm-mcp --ai
 linkpm add @modelcontextprotocol/server-postgres --ai
 
-# List all active MCP servers and Agent Skills registered in the current project
+# Dedicated AI add command alias:
+linkpm ai add notebooklm-mcp
+
+# 2. Inspect all active AI capabilities in the project:
 linkpm ai list
 
-# Scan existing node_modules/ for AI capabilities and sync with IDE configs
+# 3. Scan existing node_modules/ for AI capabilities and re-synchronize all IDE configs:
 linkpm ai sync
 
-# Remove an AI capability and clean up MCP configs and skill junctions
-linkpm ai remove @modelcontextprotocol/server-postgres
+# 4. Remove an AI capability and clean up IDE configurations and skill junctions:
+linkpm ai remove notebooklm-mcp
 ```
 
-**Auto-Synchronized Configurations**:
-When an AI-capable package is installed, LinkPM discovers its declared contracts (`package.json.ai`, `mcp.json`, or `@modelcontextprotocol/*`) and automatically writes and maintains links in:
-- `.cursor/mcp.json` (Cursor IDE)
-- `mcp_config.json` (Antigravity IDE & Gemini)
-- `.agents/skills/` (Workspace Agent Skills)
-- `.linkpm/ai.json` (Deterministic Project AI Registry)
+#### 🔍 Automatic Detection Heuristics
+LinkPM inspects installed packages without requiring manual plumbing or custom wrapper scripts:
+- **Official MCP Servers**: Automatically detects `@modelcontextprotocol/*` packages and wires their binary entry points (`dist/index.js`).
+- **Community MCP Servers**: Discovers community packages by name suffix (`*-mcp`, `*-mcp-*`), keyword tags (`"mcp"`, `"mcp-server"`), or direct dependencies on `@modelcontextprotocol/sdk` (e.g. `notebooklm-mcp`).
+- **Explicit Manifests**: Reads standard `mcp.json` or `package.json.ai` declarations specifying custom `command`, `args`, and `env` dictionaries.
+- **Agent Skills**: Discovers standard Agent Skill packages containing `skills/<skill_name>/SKILL.md` (with YAML frontmatter description parsing) and creates direct junctions in `.agents/skills/`.
+
+#### 🔄 Multi-IDE Zero-Touch Auto-Wiring
+Whenever an AI capability is installed or synced, LinkPM automatically generates and synchronizes configuration across all leading AI coding assistants:
+- **Cursor IDE**: Writes stdio server definitions into `.cursor/mcp.json`.
+- **Antigravity & Gemini**: Writes tool definitions into `mcp_config.json`.
+- **Workspace Agent Skills**: Symlinks/junctions skill folders into `.agents/skills/`.
+- **Project State Ledger**: Maintains a deterministic, version-controlled capability registry in `.linkpm/ai.json`.
 
 ---
 

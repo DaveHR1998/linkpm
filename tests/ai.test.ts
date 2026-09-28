@@ -38,6 +38,35 @@ test('AI Detection: discovers conventional @modelcontextprotocol/* MCP server pa
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+test('AI Detection: discovers community MCP packages ending with -mcp and keywords ["mcp"]', () => {
+  const tmpDir = path.join(os.tmpdir(), `linkpm-ai-comm-${Date.now()}`);
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(tmpDir, 'package.json'),
+    JSON.stringify({
+      name: 'notebooklm-mcp',
+      version: '2.0.0',
+      description: 'MCP server for Google NotebookLM',
+      keywords: ['mcp', 'notebooklm', 'gemini'],
+      bin: {
+        'notebooklm-mcp': 'dist/index.js'
+      },
+      dependencies: {
+        '@modelcontextprotocol/sdk': '^1.0.0'
+      }
+    })
+  );
+
+  const caps = detectAICapabilities(tmpDir, 'notebooklm-mcp');
+  assert.equal(caps.hasCapabilities, true);
+  assert.ok(caps.mcpServers['notebooklm']);
+  assert.equal(caps.mcpServers['notebooklm'].command, 'node');
+  assert.ok(caps.mcpServers['notebooklm'].args[0].endsWith('dist' + path.sep + 'index.js'));
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
 test('AI Detection: discovers explicit "ai" and "mcp" fields in package.json', () => {
   const tmpDir = path.join(os.tmpdir(), `linkpm-ai-exp-${Date.now()}`);
   fs.mkdirSync(tmpDir, { recursive: true });

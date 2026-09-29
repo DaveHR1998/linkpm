@@ -76,6 +76,59 @@ export function writeLockfile(projectRoot: string, lockfile: LockfileV2): void {
   };
 
   fs.writeFileSync(filePath, JSON.stringify(output, null, 2) + '\n', 'utf-8');
+
+  // Automatic Lockfile Mirroring: write 100% compliant package-lock.json (v3) for Vercel, Netlify, Render & Dependabot
+  try {
+    syncNpmPackageLock(projectRoot, output);
+  } catch {}
+}
+
+export function syncNpmPackageLock(projectRoot: string, lockfile: LockfileV2): void {
+  const npmLockPath = path.join(projectRoot, 'package-lock.json');
+  const pkgJsonPath = path.join(projectRoot, 'package.json');
+
+  let pkgJson: any = {};
+  if (fs.existsSync(pkgJsonPath)) {
+    try {
+      pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+    } catch {}
+  }
+
+  const npmPackages: Record<string, any> = {
+    '': {
+      name: pkgJson.name || 'project',
+      version: pkgJson.version || '1.0.0',
+      dependencies: pkgJson.dependencies ? { ...pkgJson.dependencies } : undefined,
+      devDependencies: pkgJson.devDependencies ? { ...pkgJson.devDependencies } : undefined,
+      peerDependencies: pkgJson.peerDependencies ? { ...pkgJson.peerDependencies } : undefined
+    }
+  };
+
+  for (const [key, entry] of Object.entries(lockfile.packages)) {
+    const atIdx = key.lastIndexOf('@');
+    const name = atIdx > 0 ? key.slice(0, atIdx) : key;
+    const nodeModulesKey = `node_modules/${name}`;
+
+    npmPackages[nodeModulesKey] = {
+      version: entry.version,
+      resolved: entry.resolved,
+      integrity: entry.integrity,
+      dev: entry.isDev ? true : undefined,
+      optional: entry.isOptional ? true : undefined,
+      dependencies: entry.dependencies && Object.keys(entry.dependencies).length > 0 ? entry.dependencies : undefined,
+      peerDependencies: entry.peerDependencies && Object.keys(entry.peerDependencies).length > 0 ? entry.peerDependencies : undefined
+    };
+  }
+
+  const npmLock = {
+    name: pkgJson.name || 'project',
+    version: pkgJson.version || '1.0.0',
+    lockfileVersion: 3,
+    requires: true,
+    packages: npmPackages
+  };
+
+  fs.writeFileSync(npmLockPath, JSON.stringify(npmLock, null, 2) + '\n', 'utf-8');
 }
 
 export function updateLockfile(

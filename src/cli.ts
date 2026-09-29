@@ -33,6 +33,7 @@ import {
   readProjectAIRegistry,
   removeAICapabilityFromConfigs
 } from './ai/index.js';
+import { deployProject } from './deploy.js';
 
 const cli = cac('linkpm');
 
@@ -155,6 +156,7 @@ cli
   .alias('i')
   .option('--offline', 'Force offline mode (use only cached packages)')
   .option('--prefer-offline', 'Prefer cached packages in store if available')
+  .option('--frozen', 'Strictly verify lockfile against package.json without modifying it (CI mode)')
   .option('--frozen-lockfile', 'Fail installation if lockfile is out of date')
   .option('--no-prune', 'Do not prune extraneous packages from node_modules')
   .option('--ignore-scripts', 'Do not run package install/postinstall lifecycle scripts')
@@ -164,6 +166,7 @@ cli
   .action(async (options: {
     offline?: boolean;
     preferOffline?: boolean;
+    frozen?: boolean;
     frozenLockfile?: boolean;
     noPrune?: boolean;
     ignoreScripts?: boolean;
@@ -172,8 +175,9 @@ cli
     allowExoticTransitive?: boolean;
   }) => {
     const projectRoot = findProjectRoot();
-    console.log(pc.bold(pc.blue('⚡ linkpm')) + pc.dim(` installing dependencies in ${projectRoot}`));
-    await installProjectDependencies(projectRoot, options);
+    const isFrozen = Boolean(options.frozen || options.frozenLockfile || (process.env.CI && options.frozenLockfile !== false && options.frozen !== false));
+    console.log(pc.bold(pc.blue('⚡ linkpm')) + pc.dim(` installing dependencies in ${projectRoot}${isFrozen ? ' (frozen mode)' : ''}`));
+    await installProjectDependencies(projectRoot, { ...options, frozenLockfile: isFrozen });
     console.log(pc.green('\n✨ Done! All dependencies linked from central store.'));
   });
 
@@ -181,18 +185,21 @@ cli
 cli
   .command('ci', 'Install exact locked dependencies from linkpm-lock.json')
   .option('--offline', 'Force offline mode')
+  .option('--frozen', 'Strictly verify lockfile against package.json')
   .option('--frozen-lockfile', 'Strictly verify lockfile against package.json')
   .option('--no-prune', 'Do not prune extraneous packages')
   .option('--ignore-scripts', 'Do not run package install/postinstall lifecycle scripts')
   .action(async (options: {
     offline?: boolean;
+    frozen?: boolean;
     frozenLockfile?: boolean;
     noPrune?: boolean;
     ignoreScripts?: boolean;
   }) => {
     const projectRoot = findProjectRoot();
     try {
-      await installFromLockfile(projectRoot, { ...options, frozenLockfile: options.frozenLockfile ?? true });
+      const isFrozen = options.frozen !== false && options.frozenLockfile !== false;
+      await installFromLockfile(projectRoot, { ...options, frozenLockfile: isFrozen });
       console.log(pc.green('\n✨ Done! All locked dependencies linked successfully.'));
     } catch (err: any) {
       console.error(pc.red(`\n✖ Error: ${err.message}`));
@@ -717,6 +724,26 @@ cli
     }
 
     console.log(pc.yellow(`Unknown AI action "${action}". Available: list, sync, add, remove.`));
+  });
+
+// 24. DEPLOY COMMAND (SERVERLESS & DOCKER FLATTENED PACKAGING)
+cli
+  .command('deploy', 'Package application with un-junctioned, flat node_modules for Serverless, Docker, and AWS Lambda')
+  .alias('isolate')
+  .option('--out <dir>', 'Output directory for standalone deployment bundle (default: dist-deploy)')
+  .option('--prod', 'Include only production dependencies (default: true)')
+  .action(async (options: { out?: string; prod?: boolean }) => {
+    const projectRoot = findProjectRoot();
+    console.log(pc.bold(pc.blue('⚡ linkpm deploy:')) + ` Packaging standalone bundle from ${pc.dim(projectRoot)}...`);
+    const res = await deployProject(projectRoot, {
+      outDir: options.out || 'dist-deploy',
+      prod: options.prod !== false
+    });
+    const mbSize = (res.totalSize / (1024 * 1024)).toFixed(2);
+    console.log(pc.bold(pc.green(`\n✔ Deployment package ready at: ${pc.cyan(res.outDir)}`)));
+    console.log(`  Packaged Dependencies: ${pc.bold(res.packagesCount.toString())} (real, unlinked files)`);
+    console.log(`  Bundle Size:           ${pc.bold(mbSize)} MB`);
+    console.log(pc.dim('Ready to deploy to AWS Lambda, Vercel Serverless, Docker, or Google Cloud Run.\n'));
   });
 
 const getCliVersion = (): string => {

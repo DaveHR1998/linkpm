@@ -432,6 +432,7 @@ export async function installProjectDependencies(
         hint: `Drifted dependencies:\n  ${integrity.errors.join('\n  ')}\nRun "linkpm install" without --frozen-lockfile to update lockfile.`
       });
     }
+    return installFromLockfile(projectRoot, options);
   }
 
   const depSpecs = Object.entries(deps).map(([name, ver]) => `${name}@${ver}`);

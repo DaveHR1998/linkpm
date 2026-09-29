@@ -20,9 +20,10 @@ LinkPM is engineered for modern JavaScript and TypeScript development, deliverin
 - **In-Place Store Poisoning Immunity**: Store package files are locked with recursive **read-only permissions** (`chmod 0o444` and NTFS `FILE_ATTRIBUTE_READONLY`), preventing accidental developer edits or build tools from mutating the shared global store.
 - **Content-Hashed Patch Variants**: Custom patches generated via `linkpm patch` are isolated into `<version>_patch_<hash>` store paths, ensuring different projects or monorepos requiring disparate patches for the same library never collide.
 - **Unmounted Drive GC Safety (30-Day Grace Period)**: Garbage collection tracks registered projects with `lastSeen` timestamps and lockfile snapshots. External SSDs or disconnected drive partitions are preserved for 30 days, preventing store cache evictions while drives are unplugged.
-- **Atomic Install Transactions**: Links are staged in memory and committed atomically. If any error or interrupt occurs, LinkPM automatically rolls back changes, ensuring `node_modules` is never left in a half-installed state.
+- **Atomic Directory Linking**: Links are staged in memory and committed in a transactional phase. If a linking error occurs, LinkPM automatically rolls back staged filesystem links, ensuring `node_modules` is never left in a half-linked state.
 - **Monorepos & Workspace Orchestration**: Comprehensive support for `pnpm-workspace.yaml` and `package.json` workspaces, `workspace:*` inter-package links, workspace catalogs, and topological multi-package script execution.
 - **One-Command Presets & Scaffolding**: Eliminate repetitive setup with curated stack presets (`frontend`, `backend`, `fastify`, `ui`), full project scaffolding (`linkpm create`), and custom team-saved bundles.
+- **AI & Agent Tooling Auto-Wiring (MCP & Skills)**: Native discovery and lifecycle management for Model Context Protocol (MCP) servers and Agent Skills. Packages installed with `--ai` automatically wire IDE assistants (`.cursor/mcp.json`, `mcp_config.json`, `.agents/skills/`) under strict opt-in security with cryptographic command pinning.
 
 ---
 
@@ -35,14 +36,14 @@ LinkPM is engineered for modern JavaScript and TypeScript development, deliverin
 | **Store Security** | Recursive read-only filesystem attributes (`0o444`) with safe writable unlinking |
 | **Patch Management** | Isolated SHA-256 content-hashed store variants (`<version>_patch_<hash>`) |
 | **Garbage Collection** | Project tracking with 30-day retention grace period for unmounted drives and recent packages |
-| **Install Reliability** | Atomic 2-phase transactional commit with automatic rollback on error |
+| **Install Reliability** | Atomic 2-phase directory linking transactions with automatic rollback on linking errors |
 | **Dependency Resolution** | Deterministic breadth-first DAG resolver with cycle detection and platform filtering |
 | **Peer Dependencies** | Explicit peer dependency conflict diagnosis and optional peer support |
 | **Lockfile Engine** | Version 2 deterministic format with sorted keys and strict CI frozen verification |
 | **Monorepo Workspaces** | Native `pnpm-workspace.yaml` parsing, topological execution runner, and workspace catalogs |
 | **Binary Execution** | Triple-shim generation (POSIX shell, Windows CMD, PowerShell) with `--preserve-symlinks` routing |
 | **Scaffolding & Presets** | Built-in presets, custom stack persistence (`~/.linkpm/presets.json`), and instant project creation |
-| **Diagnostics & Health** | Self-healing environment doctor (`linkpm doctor`), dependency tree, and audit scanning |
+| **Diagnostics & Health** | Environment health and diagnostics (`linkpm doctor`), dependency tree, and audit scanning |
 | **AI & Agent Tooling** | Native MCP server discovery, Agent Skills linking, and multi-IDE auto-wiring (.cursor, mcp_config.json) |
 
 ---

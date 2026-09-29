@@ -78,9 +78,10 @@ test('Mobile & React Native: linkHoistedPackage creates flat real directory whos
 
     // CRITICAL: Verify fs.realpath resolves inside project node_modules and NOT inside store
     const realPath = fs.realpathSync(installedPkgDir);
+    const realProjectDir = fs.realpathSync(projectDir);
     assert.ok(
-      realPath.toLowerCase().startsWith(projectDir.toLowerCase()),
-      `fs.realpath (${realPath}) must resolve within projectDir (${projectDir}) for Metro compatibility`
+      realPath.toLowerCase().startsWith(realProjectDir.toLowerCase()),
+      `fs.realpath (${realPath}) must resolve within projectDir (${realProjectDir}) for Metro compatibility`
     );
 
     // Verify files were accurately transferred

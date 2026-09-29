@@ -1,6 +1,6 @@
 {
   "name": "linkpm",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Lightning-fast NPM package manager with directory links, central store, and stack presets",
   "type": "module",
   "main": "./dist/cli.js",

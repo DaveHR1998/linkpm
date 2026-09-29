@@ -45,7 +45,6 @@
     "tar": "^7.5.22",
     "tsup": "^8.5.1",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2",
-    "notebooklm-mcp": "^2.0.0"
+    "typescript": "^7.0.2"
   }
 }

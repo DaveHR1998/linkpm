@@ -1,6 +1,6 @@
 # Contributing to linkpm
 
-Thank you for your interest in contributing to **linkpm**! linkpm is an enterprise-grade, deterministic, content-addressable package manager and AI agent runtime for JavaScript and TypeScript.
+Thank you for your interest in contributing to **linkpm**! linkpm is a deterministic, content-addressable package manager and AI agent runtime for JavaScript and TypeScript.
 
 This guide outlines how to get started, run tests, build the codebase, and submit pull requests.
 
@@ -37,7 +37,7 @@ npm run dev
 
 ## 🧪 Testing
 
-We use the native Node.js test runner (`node:test`). Tests cover resolution, linking, security, stores, lockfiles, transactions, and AI capabilities.
+We use the native Node.js test runner via `tsx` (`tsx --test`). Tests cover resolution, linking, security, stores, lockfiles, transactions, and AI capabilities.
 
 ### Run All Tests
 ```bash
@@ -46,7 +46,7 @@ npm test
 
 ### Run a Specific Test Suite
 ```bash
-node --loader ts-node/esm --test tests/security_and_reliability.test.ts
+npx tsx --test tests/security_and_reliability.test.ts
 ```
 
 All new features and bug fixes must include unit or integration tests verifying their behavior.

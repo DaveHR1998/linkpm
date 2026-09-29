@@ -36,9 +36,10 @@ The **linkpm** team takes security seriously. As a package manager responsible f
 
 If you discover a security vulnerability in linkpm, please do **not** report it via a public GitHub issue.
 
-Instead, please report vulnerabilities by email or private advisory:
-- **Email**: `security@linkpm.dev` (or open a GitHub Private Vulnerability Advisory via GitHub Security tab)
-- **Maintainer**: Dawit Yetmgeta
+Instead, please report vulnerabilities via GitHub Private Vulnerability Advisory or direct email:
+- **Private Advisory**: [Open a Private Security Advisory](https://github.com/DaveHR1998/linkpm/security/advisories/new)
+- **Monitored Email**: `devHR1998@gmail.com`
+- **Maintainer**: Dawit Yetmgeta (@DaveHR1998)
 
 Please include in your report:
 - A clear description of the vulnerability and its potential impact.

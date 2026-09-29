@@ -14,6 +14,7 @@ export type ErrorCode =
   | 'ERR_STORE_CORRUPTION'
   | 'ERR_COMMAND_FAILED'
   | 'ERR_PROJECT_NOT_FOUND'
+  | 'ERR_INVALID_DEPLOY_DIR'
   | 'ERR_SCRIPT_NOT_FOUND';
 
 export interface LinkPMErrorOptions {

@@ -70,6 +70,9 @@ export async function deployProject(
     '.cursor',
     '.mcp-wire',
     'mcp-wire',
+    'package.json',
+    'package-lock.json',
+    'linkpm-lock.json',
     targetDirName,
     path.basename(outDir)
   ]);

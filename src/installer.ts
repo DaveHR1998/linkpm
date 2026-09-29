@@ -7,10 +7,12 @@ import {
   extractToStore,
   getPackageStoreDir,
   computePatchHash,
-  registerProject
+  registerProject,
+  isNativePackage,
+  getNativeAbiSuffix
 } from './store.js';
 import { linkPackage, unlinkPackage, type LinkResult } from './linker.js';
-import { createVirtualPackage } from './linker/virtual-store.js';
+import { createVirtualPackage, computePeerContextHash } from './linker/virtual-store.js';
 import {
   addDependenciesToPackageJson,
   removeDependenciesFromPackageJson,
@@ -80,7 +82,7 @@ export async function ensurePackageInStore(
   spec: string,
   options: InstallOptions = {},
   visited: Set<string> = new Set()
-): Promise<{ resolved: ResolvedPackage; storeDir: string; fromStore: boolean; depsLinked: number }> {
+): Promise<{ resolved: ResolvedPackage; storeDir: string; virtualLinkPath?: string; fromStore: boolean; depsLinked: number }> {
   const projectRoot = options.projectRoot || process.cwd();
   const overrides = options.overrides || getProjectOverrides(projectRoot);
   const resolved = await resolvePackage(spec, { ...options, overrides, projectRoot });
@@ -106,6 +108,10 @@ export async function ensurePackageInStore(
       const patchContent = fs.readFileSync(patchFile, 'utf-8');
       effectiveVersion = `${resolved.version}_patch_${computePatchHash(patchContent)}`;
     } catch { }
+  }
+
+  if (isNativePackage(resolved.name)) {
+    effectiveVersion = `${effectiveVersion}_${getNativeAbiSuffix()}`;
   }
 
   const alreadyInStore = isPackageInStore(resolved.name, effectiveVersion);
@@ -167,12 +173,14 @@ export async function ensurePackageInStore(
   }
 
   // Create isolated virtual package mapping inside project's node_modules/.linkpm/
+  const contextHash = computePeerContextHash(resolved.peerDependencies);
   const virtualRes = createVirtualPackage({
     projectRoot,
     name: resolved.name,
     version: effectiveVersion,
     storeDir,
-    dependencies: resolvedDeps
+    dependencies: resolvedDeps,
+    contextHash
   });
 
   return {

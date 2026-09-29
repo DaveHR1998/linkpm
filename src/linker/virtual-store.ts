@@ -25,6 +25,17 @@ export function getProjectVirtualStoreDir(projectRoot: string): string {
   return path.join(projectRoot, 'node_modules', '.linkpm');
 }
 
+import crypto from 'node:crypto';
+
+/**
+ * Computes a deterministic hash of resolved peer dependencies to isolate virtual store entries.
+ */
+export function computePeerContextHash(peers?: Record<string, string>): string {
+  if (!peers || Object.keys(peers).length === 0) return '';
+  const sorted = Object.keys(peers).sort().map(k => `${k}@${peers[k]}`).join(',');
+  return crypto.createHash('sha256').update(sorted).digest('hex').slice(0, 8);
+}
+
 /**
  * Computes a unique key for a virtual package instance.
  */

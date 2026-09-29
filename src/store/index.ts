@@ -29,6 +29,38 @@ export function computePatchHash(patchContent: string): string {
   return crypto.createHash('sha256').update(patchContent.trim()).digest('hex').slice(0, 8);
 }
 
+export function getNativeAbiSuffix(): string {
+  return `_abi${process.versions.modules}_${process.platform}_${process.arch}`;
+}
+
+export function isNativePackage(nameOrPkg: any, maybePkgJson?: any): boolean {
+  let name = '';
+  let pkgJson: any = null;
+
+  if (typeof nameOrPkg === 'string') {
+    name = nameOrPkg;
+    pkgJson = maybePkgJson;
+  } else if (nameOrPkg && typeof nameOrPkg === 'object') {
+    pkgJson = nameOrPkg;
+    name = pkgJson.name || '';
+  }
+
+  if (pkgJson) {
+    if (pkgJson.gypfile) return true;
+    if (pkgJson.binary) return true;
+    const scripts = pkgJson.scripts || {};
+    const installScript = `${scripts.install || ''} ${scripts.postinstall || ''} ${scripts.preinstall || ''}`;
+    if (/node-gyp|prebuild-install|cmake-js|cargo-cp-artifact|neon/i.test(installScript)) {
+      return true;
+    }
+  }
+  const KNOWN_NATIVE = new Set([
+    'sharp', 'sqlite3', 'better-sqlite3', 'bcrypt', 'canvas', 'fsevents', 're2', 'couchbase', 'sodium-native'
+  ]);
+  const baseName = name && name.startsWith('@') ? name.split('/')[1] : name;
+  return KNOWN_NATIVE.has(name) || KNOWN_NATIVE.has(baseName);
+}
+
 export function getPackageStoreDir(name: string, version: string): string {
   const safeName = safePackageName(name);
   return path.join(getStoreDir(), safeName, version);
@@ -54,6 +86,11 @@ export async function extractToStore(
       const patchHash = computePatchHash(patchContent);
       effectiveVersion = `${pkg.version}_patch_${patchHash}`;
     } catch {}
+  }
+
+  // Native module ABI isolation
+  if (isNativePackage(pkg.name)) {
+    effectiveVersion = `${effectiveVersion}_${getNativeAbiSuffix()}`;
   }
 
   const targetDir = getPackageStoreDir(pkg.name, effectiveVersion);
@@ -146,35 +183,48 @@ export function markStoreDirectoryWritable(dirPath: string): void {
 
 export function runLifecycleScripts(
   storePackageDir: string,
-  options: ExtractOptions | boolean = {}
+  optionsOrPkgJson: any = {},
+  allowList?: string[],
+  allowBuildScripts?: boolean
 ): void {
-  const opts: ExtractOptions = typeof options === 'boolean' ? { ignoreScripts: options } : options;
+  let opts: ExtractOptions = {};
+  if (Array.isArray(allowList)) {
+    opts = {
+      onlyBuiltDependencies: allowList,
+      allowAllScripts: Boolean(allowBuildScripts)
+    };
+  } else if (typeof optionsOrPkgJson === 'boolean') {
+    opts = { ignoreScripts: optionsOrPkgJson };
+  } else if (optionsOrPkgJson) {
+    opts = optionsOrPkgJson;
+  }
+
   if (opts.ignoreScripts) return;
 
   const pkgJsonPath = path.join(storePackageDir, 'package.json');
-  if (!fs.existsSync(pkgJsonPath)) return;
+  let pkg: any = null;
+  if (fs.existsSync(pkgJsonPath)) {
+    try { pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8')); } catch {}
+  }
+  if (!pkg && optionsOrPkgJson && optionsOrPkgJson.scripts) {
+    pkg = optionsOrPkgJson;
+  }
+  if (!pkg) return;
 
   try {
-    const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
     const script = pkg.scripts?.install || pkg.scripts?.postinstall;
     if (!script) return;
 
-    // Supply-chain gating: check onlyBuiltDependencies
-    if (opts.onlyBuiltDependencies && opts.onlyBuiltDependencies.length > 0) {
-      const allowed = opts.onlyBuiltDependencies;
-      const baseName = pkg.name.startsWith('@') ? pkg.name.split('/')[1] : pkg.name;
-      if (!allowed.includes(pkg.name) && !allowed.includes(baseName)) {
-        // Block untrusted lifecycle script
+    // Supply-chain gating: default-deny (scripts do NOT run unless explicitly allowlisted)
+    if (!opts.allowAllScripts) {
+      if (!opts.onlyBuiltDependencies || opts.onlyBuiltDependencies.length === 0) {
+        // Default-deny: no lifecycle scripts run without explicit opt-in
         return;
       }
-    } else if (!opts.allowAllScripts) {
-      // Default safe whitelist for well-known build tools
-      const SAFE_BUILT_DEPENDENCIES = new Set([
-        'esbuild', '@swc/core', 'sharp', 'prisma', '@prisma/client', 'core-js', 'sqlite3', 'canvas', 'node-gyp'
-      ]);
-      const baseName = pkg.name.startsWith('@') ? pkg.name.split('/')[1] : pkg.name;
-      if (!SAFE_BUILT_DEPENDENCIES.has(pkg.name) && !SAFE_BUILT_DEPENDENCIES.has(baseName)) {
-        // Skip untrusted build script
+      const allowed = opts.onlyBuiltDependencies;
+      const baseName = pkg.name && pkg.name.startsWith('@') ? pkg.name.split('/')[1] : pkg.name;
+      if (!allowed.includes(pkg.name) && !allowed.includes(baseName)) {
+        // Block unapproved build script
         return;
       }
     }
@@ -313,4 +363,127 @@ export function clearStore(): { removedCount: number } {
     fs.rmSync(fullPath, { recursive: true, force: true });
   }
   return { removedCount: entries.length };
+}
+
+export interface TamperedPackageReport {
+  name: string;
+  version: string;
+  storeDir: string;
+  reason: string;
+  fixed?: boolean;
+}
+
+export interface StoreVerificationResult {
+  valid: boolean;
+  totalScanned: number;
+  tamperedCount: number;
+  fixedCount: number;
+  tampered: TamperedPackageReport[];
+  corruptedPackages: { package: string; issues: string[] }[];
+}
+
+export async function verifyStore(options: { fix?: boolean; storeDir?: string } = {}): Promise<StoreVerificationResult> {
+  const store = options.storeDir || getStoreDir();
+  const tarballsDir = path.join(store, '..', 'tarballs');
+  const tampered: TamperedPackageReport[] = [];
+  let totalScanned = 0;
+  let fixedCount = 0;
+
+  if (!fs.existsSync(store)) {
+    return { valid: true, totalScanned: 0, tamperedCount: 0, fixedCount: 0, tampered: [], corruptedPackages: [] };
+  }
+
+  const entries = fs.readdirSync(store, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const safeName = entry.name;
+    const realName = safeName.replace(/__/g, '/');
+    const pkgDir = path.join(store, safeName);
+    const versionDirs = fs.readdirSync(pkgDir, { withFileTypes: true }).filter(d => d.isDirectory());
+
+    for (const vDir of versionDirs) {
+      totalScanned++;
+      const version = vDir.name;
+      const targetDir = path.join(pkgDir, version);
+      const pkgJsonPath = path.join(targetDir, 'package.json');
+
+      let isTampered = false;
+      let reason = '';
+
+      if (!fs.existsSync(pkgJsonPath)) {
+        isTampered = true;
+        reason = 'Missing package.json in store directory';
+      } else {
+        try {
+          const raw = fs.readFileSync(pkgJsonPath, 'utf-8');
+          JSON.parse(raw);
+        } catch {
+          isTampered = true;
+          reason = 'Corrupted package.json JSON syntax';
+        }
+      }
+
+      if (!isTampered) {
+        const integrityPath = path.join(targetDir, '.linkpm-integrity.json');
+        if (fs.existsSync(integrityPath)) {
+          try {
+            const manifest = JSON.parse(fs.readFileSync(integrityPath, 'utf-8'));
+            for (const [relFile, expectedHash] of Object.entries(manifest)) {
+              const fullFile = path.join(targetDir, relFile);
+              if (!fs.existsSync(fullFile)) {
+                isTampered = true;
+                reason = `Missing file ${relFile}`;
+                break;
+              }
+              const fileBuf = fs.readFileSync(fullFile);
+              const actualHash = `sha512-${crypto.createHash('sha512').update(fileBuf).digest('base64')}`;
+              if (actualHash !== expectedHash) {
+                isTampered = true;
+                reason = `Integrity mismatch for ${relFile}`;
+                break;
+              }
+            }
+          } catch {}
+        }
+      }
+
+      if (isTampered) {
+        let fixed = false;
+        if (options.fix) {
+          const cleanVersion = version.split('_')[0];
+          const tarballPath = path.join(tarballsDir, `${safeName}-${cleanVersion}.tgz`);
+          if (fs.existsSync(tarballPath)) {
+            try {
+              markStoreDirectoryWritable(targetDir);
+              fs.rmSync(targetDir, { recursive: true, force: true });
+              fs.mkdirSync(targetDir, { recursive: true });
+              await FetchManager.safeExtractTar(tarballPath, targetDir);
+              markStoreDirectoryReadOnly(targetDir);
+              fixed = true;
+              fixedCount++;
+            } catch {}
+          }
+        }
+        tampered.push({
+          name: realName,
+          version,
+          storeDir: targetDir,
+          reason,
+          fixed
+        });
+      }
+    }
+  }
+
+  return {
+    valid: tampered.length === 0,
+    totalScanned,
+    tamperedCount: tampered.length,
+    fixedCount,
+    tampered,
+    corruptedPackages: tampered.map(t => ({
+      package: `${t.name}@${t.version}`,
+      issues: [t.reason]
+    }))
+  };
 }

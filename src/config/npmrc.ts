@@ -11,6 +11,9 @@ export interface NpmrcConfig {
   proxy?: string;
   httpsProxy?: string;
   storeDir?: string;
+  minimumReleaseAge: number; // in milliseconds, default 24h
+  releaseAgeExclude: string[];
+  allowExoticTransitive: boolean;
   raw: Record<string, string>;
 }
 
@@ -93,6 +96,30 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
   const httpsProxy = config['https-proxy'] || process.env.HTTPS_PROXY || process.env.https_proxy;
   const storeDir = config['store-dir'] || config['store_dir'];
 
+  // Parse minimum-release-age (default: 24h = 86400s)
+  let minimumReleaseAge = 86400;
+  const rawMinAge = config['minimum-release-age'] || config['minimum_release_age'];
+  if (rawMinAge !== undefined) {
+    if (rawMinAge.endsWith('h')) {
+      minimumReleaseAge = parseFloat(rawMinAge) * 3600;
+    } else if (rawMinAge.endsWith('d')) {
+      minimumReleaseAge = parseFloat(rawMinAge) * 86400;
+    } else if (rawMinAge.endsWith('m')) {
+      minimumReleaseAge = parseFloat(rawMinAge) * 60;
+    } else if (rawMinAge.endsWith('s')) {
+      minimumReleaseAge = parseFloat(rawMinAge);
+    } else if (!isNaN(Number(rawMinAge))) {
+      minimumReleaseAge = Number(rawMinAge);
+    }
+  }
+
+  // Parse release-age-exclude
+  const rawExclude = config['release-age-exclude'] || config['release_age_exclude'] || '';
+  const releaseAgeExclude = rawExclude.split(',').map(s => s.trim()).filter(Boolean);
+
+  // Parse allow-exotic-transitive
+  const allowExoticTransitive = config['allow-exotic-transitive'] === 'true' || config['allow_exotic_transitive'] === 'true';
+
   return {
     registry,
     scopedRegistries,
@@ -102,9 +129,15 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
     proxy,
     httpsProxy,
     storeDir,
+    minimumReleaseAge,
+    releaseAgeExclude,
+    allowExoticTransitive,
     raw: config
   };
 }
+
+export const loadNpmrcConfig = loadNpmrc;
+
 
 export function getRegistryForPackage(packageName: string, npmrc: NpmrcConfig): string {
   if (packageName.startsWith('@')) {

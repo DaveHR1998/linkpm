@@ -10,6 +10,10 @@ import { safeRemoveLinkOrDir } from '../src/linker.js';
 import { pruneExtraneousDependencies } from '../src/installer.js';
 import { FileLock } from '../src/store/lock.js';
 import { LinkPMError, IntegrityMismatchError } from '../src/utils/errors.js';
+import { runLifecycleScripts, verifyStore, isNativePackage, getNativeAbiSuffix } from '../src/store/index.js';
+import { findUnapprovedBuiltDependencies, approveBuiltDependencies } from '../src/scripts/approve.js';
+import { computePeerContextHash } from '../src/linker/virtual-store.js';
+import { loadNpmrcConfig } from '../src/config/npmrc.js';
 
 describe('Security & Production Reliability Tests', () => {
   const tmpDir = path.join(os.tmpdir(), `linkpm-sec-test-${Date.now()}`);
@@ -447,7 +451,174 @@ describe('Security & Production Reliability Tests', () => {
       try { fs.rmSync(path.join(storeDir, 'unmounted-dep'), { recursive: true, force: true }); } catch {}
     });
   });
+
+  describe('6. Default-Deny Install Scripts & linkpm approve-builds', () => {
+    it('should block install/postinstall scripts unless explicitly allow-listed', () => {
+      const pkgDir = path.join(tmpDir, 'script-pkg-blocked');
+      fs.mkdirSync(pkgDir, { recursive: true });
+      const markerFile = path.join(pkgDir, 'installed.txt');
+
+      const pkgJson = {
+        name: 'test-blocked-script',
+        version: '1.0.0',
+        scripts: {
+          postinstall: `node -e "require('fs').writeFileSync('${markerFile.replace(/\\/g, '\\\\')}', 'hacked')"`
+        }
+      };
+      fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(pkgJson));
+
+      // 1. Run without allow-list and without allowBuildScripts -> MUST be blocked
+      runLifecycleScripts(pkgDir, pkgJson, [], false);
+      assert.strictEqual(fs.existsSync(markerFile), false, 'Postinstall script must not execute when unapproved');
+
+      // 2. Run with package allow-listed in onlyBuiltDependencies -> MUST execute
+      runLifecycleScripts(pkgDir, pkgJson, ['test-blocked-script'], false);
+      assert.strictEqual(fs.existsSync(markerFile), true, 'Postinstall script should execute when in allowList');
+      assert.strictEqual(fs.readFileSync(markerFile, 'utf-8'), 'hacked');
+      fs.rmSync(markerFile, { force: true });
+
+      // 3. Run with allowBuildScripts=true override -> MUST execute
+      runLifecycleScripts(pkgDir, pkgJson, [], true);
+      assert.strictEqual(fs.existsSync(markerFile), true, 'Postinstall script should execute when allowBuildScripts is true');
+    });
+
+    it('findUnapprovedBuiltDependencies and approveBuiltDependencies should detect and persist approvals', () => {
+      const projectDir = path.join(tmpDir, 'approve-test-proj');
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      const pkgJsonPath = path.join(projectDir, 'package.json');
+      fs.writeFileSync(pkgJsonPath, JSON.stringify({
+        name: 'my-app',
+        version: '1.0.0',
+        dependencies: {
+          'native-dep': '^1.0.0',
+          'safe-dep': '^2.0.0'
+        },
+        onlyBuiltDependencies: []
+      }, null, 2));
+
+      // Create fake node_modules
+      const nativePkgDir = path.join(projectDir, 'node_modules', 'native-dep');
+      fs.mkdirSync(nativePkgDir, { recursive: true });
+      fs.writeFileSync(path.join(nativePkgDir, 'package.json'), JSON.stringify({
+        name: 'native-dep',
+        version: '1.0.0',
+        scripts: { install: 'node-gyp rebuild' }
+      }));
+
+      const safePkgDir = path.join(projectDir, 'node_modules', 'safe-dep');
+      fs.mkdirSync(safePkgDir, { recursive: true });
+      fs.writeFileSync(path.join(safePkgDir, 'package.json'), JSON.stringify({
+        name: 'safe-dep',
+        version: '2.0.0'
+      }));
+
+      // Find unapproved
+      const unapproved = findUnapprovedBuiltDependencies(projectDir);
+      assert.strictEqual(unapproved.length, 1);
+      assert.strictEqual(unapproved[0].name, 'native-dep');
+      assert.strictEqual(unapproved[0].scriptType, 'install');
+
+      // Approve it
+      approveBuiltDependencies(projectDir, ['native-dep']);
+
+      const updated = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+      assert.ok(updated.onlyBuiltDependencies.includes('native-dep'));
+
+      // Check unapproved again -> should now be empty
+      const afterApproval = findUnapprovedBuiltDependencies(projectDir);
+      assert.strictEqual(afterApproval.length, 0);
+    });
+  });
+
+  describe('7. Security Cooldown (minimumReleaseAge) & Exotic Sources', () => {
+    it('npmrc config correctly defaults minimumReleaseAge to 86400s (24h) and allowExoticTransitive to false', () => {
+      const config = loadNpmrcConfig(tmpDir);
+      assert.strictEqual(config.minimumReleaseAge, 86400, 'Default release cooldown must be 24h (86400 seconds)');
+      assert.strictEqual(config.allowExoticTransitive, false, 'Default allowExoticTransitive must be false');
+    });
+
+    it('npmrc custom settings can override cooldown and exotic settings', () => {
+      const customDir = path.join(tmpDir, 'custom-npmrc');
+      fs.mkdirSync(customDir, { recursive: true });
+      fs.writeFileSync(path.join(customDir, '.npmrc'), [
+        'minimum-release-age=3600',
+        'release-age-exclude=fast-patch,critical-sec',
+        'allow-exotic-transitive=true'
+      ].join('\n'));
+
+      const config = loadNpmrcConfig(customDir);
+      assert.strictEqual(config.minimumReleaseAge, 3600);
+      assert.deepStrictEqual(config.releaseAgeExclude, ['fast-patch', 'critical-sec']);
+      assert.strictEqual(config.allowExoticTransitive, true);
+    });
+  });
+
+  describe('8. Central Store Verification (store verify)', () => {
+    it('verifyStore should detect altered package files', async () => {
+      const storeDir = path.join(tmpDir, 'test-store-verify');
+      const pkgDir = path.join(storeDir, 'tamper-test', '1.0.0');
+      fs.mkdirSync(pkgDir, { recursive: true });
+
+      const fileContent = 'console.log("original");';
+      fs.writeFileSync(path.join(pkgDir, 'index.js'), fileContent);
+      fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ name: 'tamper-test', version: '1.0.0' }));
+
+      // Write integrity manifest
+      const hash = crypto.createHash('sha512').update(fileContent).digest('base64');
+      fs.writeFileSync(path.join(pkgDir, '.linkpm-integrity.json'), JSON.stringify({
+        'index.js': `sha512-${hash}`
+      }));
+
+      // 1. Verify before tampering -> should pass
+      const resultBefore = await verifyStore({ storeDir, fix: false });
+      assert.strictEqual(resultBefore.valid, true);
+      assert.strictEqual(resultBefore.corruptedPackages.length, 0);
+
+      // 2. Tamper with the file
+      fs.writeFileSync(path.join(pkgDir, 'index.js'), 'console.log("tampered!");');
+
+      const resultAfter = await verifyStore({ storeDir, fix: false });
+      assert.strictEqual(resultAfter.valid, false);
+      assert.strictEqual(resultAfter.corruptedPackages.length, 1);
+      assert.strictEqual(resultAfter.corruptedPackages[0].package, 'tamper-test@1.0.0');
+      assert.ok(resultAfter.corruptedPackages[0].issues[0].includes('Integrity mismatch for index.js'));
+    });
+  });
+
+  describe('9. ABI-Scoped Native Build Keys & Peer Context Isolation', () => {
+    it('isNativePackage correctly identifies packages requiring native builds', () => {
+      assert.strictEqual(isNativePackage({ gypfile: true }), true);
+      assert.strictEqual(isNativePackage({ binary: { module_name: 'test' } }), true);
+      assert.strictEqual(isNativePackage({ scripts: { install: 'node-gyp rebuild' } }), true);
+      assert.strictEqual(isNativePackage({ scripts: { build: 'tsc' } }), false);
+      assert.strictEqual(isNativePackage({}), false);
+    });
+
+    it('getNativeAbiSuffix produces deterministic ABI/platform/arch suffix', () => {
+      const suffix = getNativeAbiSuffix();
+      assert.ok(suffix.startsWith('_abi'), `Suffix should start with _abi: ${suffix}`);
+      assert.ok(suffix.includes(process.platform), `Suffix should contain platform: ${suffix}`);
+      assert.ok(suffix.includes(process.arch), `Suffix should contain arch: ${suffix}`);
+    });
+
+    it('computePeerContextHash generates distinct deterministic hashes for differing peer dependency trees', () => {
+      const hashA = computePeerContextHash({ react: '18.2.0', 'react-dom': '18.2.0' });
+      const hashB = computePeerContextHash({ react: '19.0.0', 'react-dom': '19.0.0' });
+      const hashEmpty = computePeerContextHash({});
+
+      assert.strictEqual(hashEmpty, '');
+      assert.strictEqual(hashA.length, 8);
+      assert.strictEqual(hashB.length, 8);
+      assert.notStrictEqual(hashA, hashB, 'Different peer versions must yield distinct context hashes');
+
+      // Key ordering independence
+      const hashA2 = computePeerContextHash({ 'react-dom': '18.2.0', react: '18.2.0' });
+      assert.strictEqual(hashA, hashA2, 'Key ordering in peer record must not alter context hash');
+    });
+  });
 });
+
 
 
 

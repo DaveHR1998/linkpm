@@ -37,6 +37,13 @@ export function buildScriptEnv(projectRoot: string, options: ScriptEnvOptions = 
   const projectNm = path.join(path.resolve(projectRoot), 'node_modules');
   const nodePathList = [projectNm, existingNodePath].filter(Boolean).join(path.delimiter);
 
+  let linkpmVersion = '1.0.4';
+  try {
+    const pkgPath = new URL('../../package.json', import.meta.url);
+    const data = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    if (data.version) linkpmVersion = data.version;
+  } catch {}
+
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: newPath,
@@ -44,7 +51,7 @@ export function buildScriptEnv(projectRoot: string, options: ScriptEnvOptions = 
     NODE_OPTIONS: nodeOptionsList.join(' '),
     NODE_PATH: nodePathList,
     INIT_CWD: process.cwd(),
-    npm_config_user_agent: 'linkpm/1.0.1 node/' + process.version + ' ' + process.platform + ' ' + process.arch,
+    npm_config_user_agent: `linkpm/${linkpmVersion} node/${process.version} ${process.platform} ${process.arch}`,
     npm_execpath: process.argv[1] || 'linkpm'
   };
 

@@ -108,8 +108,30 @@ export function getProjectOverrides(projectRoot: string): Record<string, string>
 
 export function getOnlyBuiltDependencies(projectRoot: string): string[] | undefined {
   const pkg = readPackageJson(projectRoot);
-  const list = pkg.pnpm?.onlyBuiltDependencies || pkg.linkpm?.onlyBuiltDependencies;
+  const list = pkg.onlyBuiltDependencies || pkg.pnpm?.onlyBuiltDependencies || pkg.linkpm?.onlyBuiltDependencies;
   return Array.isArray(list) ? list : undefined;
+}
+
+export function addOnlyBuiltDependencies(projectRoot: string, packageNames: string[]): string[] {
+  const pkg = readPackageJson(projectRoot);
+  const existing = new Set<string>(
+    Array.isArray(pkg.onlyBuiltDependencies) ? pkg.onlyBuiltDependencies :
+    (Array.isArray(pkg.pnpm?.onlyBuiltDependencies) ? pkg.pnpm.onlyBuiltDependencies :
+    (Array.isArray(pkg.linkpm?.onlyBuiltDependencies) ? pkg.linkpm.onlyBuiltDependencies : []))
+  );
+  for (const name of packageNames) {
+    existing.add(name);
+  }
+  const updated = Array.from(existing).sort();
+  if (pkg.pnpm?.onlyBuiltDependencies) {
+    pkg.pnpm.onlyBuiltDependencies = updated;
+  } else if (pkg.linkpm?.onlyBuiltDependencies) {
+    pkg.linkpm.onlyBuiltDependencies = updated;
+  } else {
+    pkg.onlyBuiltDependencies = updated;
+  }
+  writePackageJson(projectRoot, pkg);
+  return updated;
 }
 
 export function getPatchedDependencies(projectRoot: string): Record<string, string> {

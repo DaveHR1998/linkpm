@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import semver from 'semver';
+import { execSync } from 'node:child_process';
 import { RegistryClient, type PackageVersionMetadata } from '../registry/client.js';
 import { DependencyGraph, type DependencyNode } from '../graph/index.js';
 import { parsePackageSpec } from './spec.js';
@@ -8,6 +9,7 @@ import { shouldSkipOptionalPackage } from './platform.js';
 import { PeerEngine, type PeerValidationResult } from './peer.js';
 import { LinkPMError } from '../utils/errors.js';
 import { findWorkspaceRoot, resolveCatalogDependency } from '../workspaces/config.js';
+import { loadNpmrc } from '../config/index.js';
 
 export * from './spec.js';
 export * from './platform.js';
@@ -20,6 +22,10 @@ export interface ResolveOptions {
   overrides?: Record<string, string>;
   strictPeers?: boolean;
   catalogs?: Record<string, Record<string, string>>;
+  minimumReleaseAge?: number;
+  releaseAgeExclude?: string[];
+  ignoreReleaseAge?: boolean;
+  allowExoticTransitive?: boolean;
 }
 
 export interface ResolveResult {
@@ -34,7 +40,13 @@ export class DependencyResolver {
   private overrides: Record<string, string>;
 
   constructor(options: ResolveOptions = {}) {
-    this.defaultOptions = options;
+    const npmrc = loadNpmrc(options.projectRoot);
+    this.defaultOptions = {
+      minimumReleaseAge: npmrc.minimumReleaseAge,
+      releaseAgeExclude: npmrc.releaseAgeExclude,
+      allowExoticTransitive: npmrc.allowExoticTransitive,
+      ...options
+    };
     this.registryClient = new RegistryClient({
       projectRoot: options.projectRoot,
       offline: options.offline,
@@ -118,6 +130,65 @@ export class DependencyResolver {
       // Also check overrides for realPackageName
       if (this.overrides[realPackageName]) {
         rawRange = this.overrides[realPackageName];
+      }
+
+      // Security check: Block exotic transitive sources (git, tarball, local path) by default
+      if (parentId && (parsed.type === 'file' || parsed.type === 'link' || parsed.type === 'git' || parsed.type === 'tarball')) {
+        if (!mergedOptions.allowExoticTransitive) {
+          throw new LinkPMError(
+            `Security violation: Transitive exotic dependency "${requestedName}@${rawRange}" (type: ${parsed.type}) blocked by default`,
+            {
+              code: 'ERR_STORE_CORRUPTION',
+              packageName: requestedName,
+              requestedVersion: rawRange,
+              hint: 'Transitive git, tarball, and local path dependencies pose supply-chain risks. Pass --allow-exotic-transitive or set allow-exotic-transitive=true in .npmrc to permit them.'
+            }
+          );
+        }
+      }
+
+      // Handle git: dependencies with exact commit hash resolution
+      if (parsed.type === 'git' && parsed.target) {
+        let commitHash = parsed.range || 'HEAD';
+        try {
+          const gitCmd = `git ls-remote "${parsed.target}" ${parsed.range || 'HEAD'}`;
+          const gitOut = execSync(gitCmd, { encoding: 'utf-8', timeout: 8000 });
+          const firstLine = gitOut.trim().split(/\r?\n/)[0];
+          if (firstLine) {
+            const sha = firstLine.split(/\s+/)[0];
+            if (/^[a-f0-9]{40}$/i.test(sha)) {
+              commitHash = sha;
+            }
+          }
+        } catch {}
+
+        const nodeId = `${realPackageName}@git-${commitHash.slice(0, 10)}`;
+        let node = graph.getNode(nodeId);
+        if (!node) {
+          node = {
+            id: nodeId,
+            name: realPackageName,
+            version: `git-${commitHash.slice(0, 10)}`,
+            tarballUrl: `${parsed.target}#${commitHash}`,
+            isDev,
+            isOptional,
+            dependencies: new Map(),
+            peerDependencies: {},
+            parentIds: new Set()
+          };
+          graph.addNode(node);
+        }
+
+        if (parentId) {
+          graph.addEdge(parentId, requestedName, nodeId);
+        } else {
+          if (isDev) {
+            graph.rootDevDependencies.set(requestedName, nodeId);
+          } else {
+            graph.rootDependencies.set(requestedName, nodeId);
+          }
+        }
+        continue;
       }
 
       // Handle local file: and link: protocols directly
@@ -211,8 +282,8 @@ export class DependencyResolver {
         throw err;
       }
 
-      // Resolve version matching targetRange
-      const resolvedVersion = this.matchVersion(realPackageName, targetRange, manifest);
+      // Resolve version matching targetRange with release-age cooldown
+      const resolvedVersion = this.matchVersion(realPackageName, targetRange, manifest, mergedOptions);
       const versionMeta: PackageVersionMetadata = manifest.versions[resolvedVersion];
       if (!versionMeta) {
         if (isOptional) continue;
@@ -302,7 +373,7 @@ export class DependencyResolver {
     };
   }
 
-  private matchVersion(name: string, range: string, manifest: any): string {
+  private matchVersion(name: string, range: string, manifest: any, options: ResolveOptions = {}): string {
     const versions = Object.keys(manifest.versions || {});
     if (versions.length === 0) {
       throw new LinkPMError(`No published versions found for "${name}"`, {
@@ -311,27 +382,76 @@ export class DependencyResolver {
       });
     }
 
+    const minAgeSec = options.minimumReleaseAge ?? 86400;
+    const minAge = minAgeSec > 100000 ? minAgeSec : minAgeSec * 1000;
+    const exclude = new Set(options.releaseAgeExclude || []);
+    const enforceCooldown = !options.ignoreReleaseAge && !exclude.has(name) && minAge > 0 && manifest.time;
+
+    // Filter versions that satisfy the minimum release age cooldown
+    const cooldownSafeVersions = enforceCooldown
+      ? versions.filter(v => {
+          const published = manifest.time[v];
+          if (!published) return true;
+          return Date.now() - new Date(published).getTime() >= minAge;
+        })
+      : versions;
+
     // Check dist-tags e.g. "latest", "next", "beta"
     if (manifest['dist-tags'] && manifest['dist-tags'][range]) {
-      return manifest['dist-tags'][range];
+      const tagVer = manifest['dist-tags'][range];
+      if (!enforceCooldown || cooldownSafeVersions.includes(tagVer)) {
+        return tagVer;
+      }
     }
 
     // Check exact version
     if (semver.valid(range) && versions.includes(range)) {
+      if (enforceCooldown && !cooldownSafeVersions.includes(range)) {
+        const pubTime = manifest.time[range];
+        const ageHours = pubTime ? ((Date.now() - new Date(pubTime).getTime()) / (3600 * 1000)).toFixed(1) : 'unknown';
+        throw new LinkPMError(
+          `Security Cooldown: "${name}@${range}" was published ${ageHours}h ago (minimum release age: ${(minAge / (3600 * 1000)).toFixed(0)}h)`,
+          {
+            code: 'ERR_VERSION_NOT_FOUND',
+            packageName: name,
+            requestedVersion: range,
+            hint: `To install this package immediately, pass --ignore-release-age or add "${name}" to release-age-exclude in .npmrc.`
+          }
+        );
+      }
       return range;
     }
 
-    // Semver range matching
-    const matched = semver.maxSatisfying(versions, range, { includePrerelease: false }) ||
-                    semver.maxSatisfying(versions, range, { includePrerelease: true });
+    // Semver range matching against cooldownSafeVersions first
+    const matched = semver.maxSatisfying(cooldownSafeVersions, range, { includePrerelease: false }) ||
+                    semver.maxSatisfying(cooldownSafeVersions, range, { includePrerelease: true });
 
     if (matched) {
       return matched;
     }
 
+    // If semver matched in raw versions but was blocked by cooldown
+    const unsafeMatch = semver.maxSatisfying(versions, range);
+    if (unsafeMatch && enforceCooldown && !cooldownSafeVersions.includes(unsafeMatch)) {
+      const pubTime = manifest.time[unsafeMatch];
+      const ageHours = pubTime ? ((Date.now() - new Date(pubTime).getTime()) / (3600 * 1000)).toFixed(1) : 'unknown';
+      throw new LinkPMError(
+        `Security Cooldown: Latest satisfying version "${name}@${unsafeMatch}" was published ${ageHours}h ago (minimum release age: ${(minAge / (3600 * 1000)).toFixed(0)}h)`,
+        {
+          code: 'ERR_VERSION_NOT_FOUND',
+          packageName: name,
+          requestedVersion: range,
+          hint: `To install this release immediately, pass --ignore-release-age or add "${name}" to release-age-exclude in .npmrc.`
+        }
+      );
+    }
+
     // Fallback to latest tag if nothing satisfied
     if (manifest['dist-tags']?.latest) {
-      return manifest['dist-tags'].latest;
+      const latestVer = manifest['dist-tags'].latest;
+      if (!enforceCooldown || cooldownSafeVersions.includes(latestVer)) {
+        return latestVer;
+      }
     }
 
     throw new LinkPMError(`No version of "${name}" satisfies range "${range}"`, {

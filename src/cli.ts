@@ -11,8 +11,9 @@ import {
   installFromLockfile
 } from './installer.js';
 import { listPresets, findPreset, saveCustomPreset, removeCustomPreset } from './presets.js';
-import { listStore, clearStore, runGarbageCollection, getRegisteredProjects } from './store.js';
+import { listStore, clearStore, runGarbageCollection, getRegisteredProjects, verifyStore } from './store.js';
 import { scaffoldProject } from './scaffolder.js';
+import { runApproveBuilds } from './scripts/approve.js';
 import { runDoctor, printDoctorResults } from './diagnostics/doctor.js';
 import { checkOutdated, printOutdatedTable } from './diagnostics/outdated.js';
 import { runSecurityAudit, printAuditResults } from './diagnostics/audit.js';
@@ -158,6 +159,8 @@ cli
   .option('--no-prune', 'Do not prune extraneous packages from node_modules')
   .option('--ignore-scripts', 'Do not run package install/postinstall lifecycle scripts')
   .option('--allow-build-scripts', 'Allow all package build scripts without supply-chain restrictions')
+  .option('--ignore-release-age', 'Bypass minimum release age cooldown for urgent hotfixes')
+  .option('--allow-exotic-transitive', 'Allow transitive git, tarball, and local path dependencies')
   .action(async (options: {
     offline?: boolean;
     preferOffline?: boolean;
@@ -165,6 +168,8 @@ cli
     noPrune?: boolean;
     ignoreScripts?: boolean;
     allowAllScripts?: boolean;
+    ignoreReleaseAge?: boolean;
+    allowExoticTransitive?: boolean;
   }) => {
     const projectRoot = findProjectRoot();
     console.log(pc.bold(pc.blue('⚡ linkpm')) + pc.dim(` installing dependencies in ${projectRoot}`));
@@ -373,13 +378,45 @@ cli
       return;
     }
 
+    if (act === 'verify') {
+      const fix = Boolean(options.force || (options as any).fix);
+      console.log(pc.bold(pc.blue('🔍 linkpm store verify:')) + ' Verifying central store package integrity...');
+      const res = await verifyStore({ fix });
+      console.log(`  Packages Scanned:  ${pc.bold(res.totalScanned.toString())}`);
+      if (res.tamperedCount === 0) {
+        console.log(pc.bold(pc.green('\n✔ Store integrity verified. 0 tampered or corrupted packages found.\n')));
+      } else {
+        console.log(pc.bold(pc.red(`\n✖ Detected ${res.tamperedCount} tampered or corrupted package(s):`)));
+        for (const t of res.tampered) {
+          const status = t.fixed ? pc.green('[FIXED]') : pc.red('[CORRUPTED]');
+          console.log(`  ${status} ${pc.bold(t.name)}@${t.version}: ${t.reason}`);
+        }
+        if (!fix) {
+          console.log(pc.dim('\nRun "linkpm store verify --fix" to automatically restore corrupted packages from verified tarballs.\n'));
+        } else {
+          console.log(pc.bold(pc.green(`\n✔ Automatically repaired ${res.fixedCount} package(s).\n`)));
+        }
+      }
+      return;
+    }
+
     if (act === 'clear') {
       const res = await clearStore();
       console.log(pc.green(`✔ Cleared ${res.removedCount} packages from central store.`));
       return;
     }
 
-    console.log(pc.yellow(`Unknown store action "${action}". Available: list, status, gc, clear, path.`));
+    console.log(pc.yellow(`Unknown store action "${action}". Available: list, status, gc, verify, clear, path.`));
+  });
+
+// 8b. APPROVE-BUILDS COMMAND
+cli
+  .command('approve-builds', 'Inspect and approve package build scripts under default-deny policy')
+  .option('-y, --yes', 'Automatically approve all detected build scripts without interactive prompt')
+  .option('--all', 'Alias for --yes')
+  .action(async (options: { yes?: boolean; all?: boolean }) => {
+    const projectRoot = findProjectRoot();
+    await runApproveBuilds(projectRoot, { yes: Boolean(options.yes || options.all), all: Boolean(options.all) });
   });
 
 // 9. INIT COMMAND

@@ -5,6 +5,7 @@ import pc from 'picocolors';
 import { LINKPM_HOME, getStoreDir, TARBALLS_DIR, loadNpmrc } from '../config/index.js';
 import { LOCKFILE_NAME, readLockfile } from '../lockfile/index.js';
 import { readPackageJson } from '../package-json.js';
+import { checkIdeDiagnostics, initIdeConfig } from '../ide/index.js';
 
 export interface DiagnosticCheck {
   name: string;
@@ -13,7 +14,10 @@ export interface DiagnosticCheck {
   details?: string;
 }
 
-export async function runDoctor(projectRoot: string = process.cwd()): Promise<DiagnosticCheck[]> {
+export async function runDoctor(
+  projectRoot: string = process.cwd(),
+  options: { fix?: boolean } = {}
+): Promise<DiagnosticCheck[]> {
   const checks: DiagnosticCheck[] = [];
 
   // 1. Node.js Version
@@ -118,6 +122,26 @@ export async function runDoctor(projectRoot: string = process.cwd()): Promise<Di
         message: `${LOCKFILE_NAME} is corrupt or unreadable`
       });
     }
+  }
+
+  // 7. IDE & TypeScript Language Server LSP Configuration
+  if (options.fix) {
+    initIdeConfig(projectRoot);
+  }
+  const ideDiag = checkIdeDiagnostics(projectRoot);
+  if (ideDiag.isReady) {
+    checks.push({
+      name: 'IDE & TypeScript LSP',
+      status: 'pass',
+      message: 'Configured (.vscode/settings.json + preserveSymlinks)'
+    });
+  } else {
+    checks.push({
+      name: 'IDE & TypeScript LSP',
+      status: 'warn',
+      message: 'Not optimized for store junctions / symlinks',
+      details: `Run "linkpm ide-init" or "linkpm doctor --fix" to auto-configure: ${ideDiag.recommendations.join(', ')}`
+    });
   }
 
   return checks;

@@ -64,3 +64,67 @@ export function printAuditResults(result: AuditResult): void {
     console.log('');
   }
 }
+
+/**
+ * Serializes AuditResult into standard SARIF (Static Analysis Results Interchange Format) v2.1.0
+ * for direct ingestion by GitHub's Code Scanning / Security tab.
+ */
+export function formatSarifReport(result: AuditResult): string {
+  const rules = result.vulnerabilities.map(v => ({
+    id: `LP-SEC-${v.package}`,
+    name: `${v.package}Vulnerability`,
+    shortDescription: {
+      text: `${v.title} in ${v.package}@${v.version}`
+    },
+    defaultConfiguration: {
+      level: v.severity === 'critical' || v.severity === 'high' ? 'error' : (v.severity === 'moderate' ? 'warning' : 'note')
+    },
+    helpUri: v.url || 'https://github.com/advisories'
+  }));
+
+  const results = result.vulnerabilities.map(v => ({
+    ruleId: `LP-SEC-${v.package}`,
+    level: v.severity === 'critical' || v.severity === 'high' ? 'error' : (v.severity === 'moderate' ? 'warning' : 'note'),
+    message: {
+      text: `${v.package}@${v.version}: ${v.title}${v.url ? ` (${v.url})` : ''}`
+    },
+    locations: [
+      {
+        physicalLocation: {
+          artifactLocation: {
+            uri: 'package.json'
+          },
+          region: {
+            startLine: 1
+          }
+        }
+      }
+    ],
+    properties: {
+      package: v.package,
+      version: v.version,
+      severity: v.severity,
+      advisoryUrl: v.url
+    }
+  }));
+
+  const sarif = {
+    $schema: 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
+    version: '2.1.0',
+    runs: [
+      {
+        tool: {
+          driver: {
+            name: 'LinkPM Security Audit',
+            version: '1.0.6',
+            informationUri: 'https://github.com/DaveHR1998/linkpm',
+            rules
+          }
+        },
+        results
+      }
+    ]
+  };
+
+  return JSON.stringify(sarif, null, 2);
+}

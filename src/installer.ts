@@ -11,7 +11,7 @@ import {
   isNativePackage,
   getNativeAbiSuffix
 } from './store.js';
-import { linkPackage, unlinkPackage, type LinkResult } from './linker.js';
+import { linkPackage, unlinkPackage, type LinkResult, hoistDependencies, type HoistDependencyItem } from './linker.js';
 import { createVirtualPackage, computePeerContextHash } from './linker/virtual-store.js';
 import {
   addDependenciesToPackageJson,
@@ -31,6 +31,7 @@ import {
 import { findPreset } from './presets.js';
 import { LinkPMError } from './utils/errors.js';
 import { registerAICapabilities, removeAICapabilityFromConfigs } from './ai/index.js';
+import { getLinkerMode, type LinkerMode } from './config/npmrc.js';
 
 export interface InstallOptions extends ResolveOptions {
   dev?: boolean;
@@ -41,6 +42,7 @@ export interface InstallOptions extends ResolveOptions {
   ai?: boolean;
   yes?: boolean;
   interactive?: boolean;
+  linker?: LinkerMode;
 }
 
 export interface InstallResult {
@@ -82,7 +84,7 @@ export async function ensurePackageInStore(
   spec: string,
   options: InstallOptions = {},
   visited: Set<string> = new Set()
-): Promise<{ resolved: ResolvedPackage; storeDir: string; virtualLinkPath?: string; fromStore: boolean; depsLinked: number }> {
+): Promise<{ resolved: ResolvedPackage; storeDir: string; virtualLinkPath?: string; fromStore: boolean; depsLinked: number; transitiveDeps?: HoistDependencyItem[] }> {
   const projectRoot = options.projectRoot || process.cwd();
   const overrides = options.overrides || getProjectOverrides(projectRoot);
   const resolved = await resolvePackage(spec, { ...options, overrides, projectRoot });
@@ -147,6 +149,7 @@ export async function ensurePackageInStore(
   }
 
   const resolvedDeps: Record<string, string> = {};
+  const transitiveDeps: HoistDependencyItem[] = [];
 
   // Batch process dependencies into virtual store
   const BATCH_SIZE = 5;
@@ -164,6 +167,15 @@ export async function ensurePackageInStore(
 
           const depResult = await ensurePackageInStore(`${dep.name}@${dep.range}`, { ...options, ai: false }, nextVisited);
           resolvedDeps[dep.name] = (depResult as any).virtualLinkPath || depResult.storeDir;
+          transitiveDeps.push({
+            name: depResult.resolved.name,
+            version: depResult.resolved.version,
+            storeDir: depResult.storeDir,
+            parentName: resolved.name
+          });
+          if (Array.isArray((depResult as any).transitiveDeps)) {
+            transitiveDeps.push(...(depResult as any).transitiveDeps);
+          }
           depsLinked++;
         } catch {
           // ignore non-critical optional dependency failures
@@ -188,7 +200,8 @@ export async function ensurePackageInStore(
     storeDir,
     virtualLinkPath: virtualRes.packageLinkPath,
     fromStore: alreadyInStore,
-    depsLinked
+    depsLinked,
+    transitiveDeps
   };
 }
 
@@ -198,16 +211,28 @@ export async function installSinglePackage(
   options: InstallOptions = {}
 ): Promise<InstallResult> {
   registerProject(projectRoot);
+  const linkerMode = options.linker || getLinkerMode(projectRoot);
   const opts: InstallOptions = {
     projectRoot,
     overrides: getProjectOverrides(projectRoot),
-    ...options
+    ...options,
+    linker: linkerMode
   };
 
-  const { resolved, storeDir, virtualLinkPath, fromStore, depsLinked } = await ensurePackageInStore(spec, opts) as any;
+  const { resolved, storeDir, virtualLinkPath, fromStore, depsLinked, transitiveDeps } = await ensurePackageInStore(spec, opts) as any;
 
-  // Link top-level package into project's node_modules/ pointing to isolated virtual package link
-  const linkRes = linkPackage(projectRoot, resolved.name, virtualLinkPath || storeDir);
+  // Link top-level package into project's node_modules/ (real dir in hoisted mode, junction in junction mode)
+  const linkRes = linkPackage(
+    projectRoot,
+    resolved.name,
+    linkerMode === 'hoisted' ? storeDir : (virtualLinkPath || storeDir),
+    { linker: linkerMode }
+  );
+
+  // In hoisted linker mode, hoist all transitive dependencies flatly into node_modules/
+  if (linkerMode === 'hoisted' && Array.isArray(transitiveDeps) && transitiveDeps.length > 0) {
+    hoistDependencies(projectRoot, transitiveDeps);
+  }
 
   // Discover and register AI capabilities ONLY IF explicitly opted-in via options.ai
   let aiCapabilities: { servers: string[]; skills: string[] } | undefined;
@@ -337,7 +362,7 @@ export async function uninstallPackages(
   return removed;
 }
 
-export function pruneExtraneousDependencies(projectRoot: string): string[] {
+export function pruneExtraneousDependencies(projectRoot: string, linkerMode?: LinkerMode): string[] {
   const nmDir = path.join(projectRoot, 'node_modules');
   if (!fs.existsSync(nmDir)) return [];
 
@@ -348,6 +373,19 @@ export function pruneExtraneousDependencies(projectRoot: string): string[] {
     ...Object.keys(pkg.optionalDependencies || {}),
     ...Object.keys(pkg.peerDependencies || {})
   ]);
+
+  const mode = linkerMode || getLinkerMode(projectRoot);
+  if (mode === 'hoisted') {
+    // In hoisted mode, all locked dependencies and their transitive deps are legitimately present in node_modules
+    const lockfile = readLockfile(projectRoot);
+    if (lockfile && lockfile.packages) {
+      for (const key of Object.keys(lockfile.packages)) {
+        const atIdx = key.lastIndexOf('@');
+        const pkgName = atIdx > 0 ? key.slice(0, atIdx) : key;
+        declared.add(pkgName);
+      }
+    }
+  }
 
   const pruned: string[] = [];
   const entries = fs.readdirSync(nmDir, { withFileTypes: true });
@@ -422,6 +460,8 @@ export async function installProjectDependencies(
   const pkg = readPackageJson(projectRoot);
   const deps = pkg.dependencies || {};
   const devDeps = pkg.devDependencies || {};
+  const linkerMode = options.linker || getLinkerMode(projectRoot);
+  const installOpts: InstallOptions = { ...options, linker: linkerMode };
 
   // Check frozen lockfile mode
   if (options.frozenLockfile) {
@@ -432,7 +472,7 @@ export async function installProjectDependencies(
         hint: `Drifted dependencies:\n  ${integrity.errors.join('\n  ')}\nRun "linkpm install" without --frozen-lockfile to update lockfile.`
       });
     }
-    return installFromLockfile(projectRoot, options);
+    return installFromLockfile(projectRoot, installOpts);
   }
 
   const depSpecs = Object.entries(deps).map(([name, ver]) => `${name}@${ver}`);
@@ -447,19 +487,19 @@ export async function installProjectDependencies(
 
   if (depSpecs.length > 0) {
     console.log(pc.bold('\nInstalling dependencies:'));
-    const res = await installPackages(depSpecs, projectRoot, { ...options, dev: false });
+    const res = await installPackages(depSpecs, projectRoot, { ...installOpts, dev: false });
     allResults.push(...res);
   }
 
   if (devDepSpecs.length > 0) {
     console.log(pc.bold('\nInstalling devDependencies:'));
-    const res = await installPackages(devDepSpecs, projectRoot, { ...options, dev: true });
+    const res = await installPackages(devDepSpecs, projectRoot, { ...installOpts, dev: true });
     allResults.push(...res);
   }
 
   // Prune extraneous packages if not disabled
   if (!options.noPrune) {
-    const pruned = pruneExtraneousDependencies(projectRoot);
+    const pruned = pruneExtraneousDependencies(projectRoot, linkerMode);
     if (pruned.length > 0) {
       console.log(pc.dim(`\n  🧹 Pruned ${pruned.length} extraneous package(s) from node_modules: ${pruned.join(', ')}`));
     }
@@ -472,6 +512,9 @@ export async function installFromLockfile(
   projectRoot: string,
   options: InstallOptions = {}
 ): Promise<InstallResult[]> {
+  const linkerMode = options.linker || getLinkerMode(projectRoot);
+  const installOpts: InstallOptions = { ...options, linker: linkerMode };
+
   // Check frozen lockfile integrity
   if (options.frozenLockfile) {
     const integrity = verifyLockfileIntegrity(projectRoot);
@@ -497,10 +540,10 @@ export async function installFromLockfile(
   console.log(pc.bold(pc.blue('⚡ linkpm ci:')) + pc.dim(` Installing ${entries.length} locked packages...`));
 
   const specs = entries.map(([key]) => key);
-  const results = await installPackages(specs, projectRoot, options);
+  const results = await installPackages(specs, projectRoot, installOpts);
 
   if (!options.noPrune) {
-    const pruned = pruneExtraneousDependencies(projectRoot);
+    const pruned = pruneExtraneousDependencies(projectRoot, linkerMode);
     if (pruned.length > 0) {
       console.log(pc.dim(`  🧹 Pruned ${pruned.length} extraneous package(s): ${pruned.join(', ')}`));
     }

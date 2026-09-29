@@ -82,7 +82,16 @@ linkpm add react --offline
 
 # Strict CI install from linkpm-lock.json (fails if lockfile is out of sync)
 linkpm ci
+linkpm install --frozen
 linkpm install --frozen-lockfile
+
+# Standalone Serverless & Docker Deployment (copies real files, resolves junctions)
+linkpm deploy --out dist-deploy
+linkpm deploy --out dist-lambda --prod
+
+# Automatic Lockfile Mirroring:
+# linkpm install / add automatically writes both linkpm-lock.json AND standard
+# package-lock.json (v3) for instant zero-config Vercel, Netlify, Render, and Dependabot support!
 
 # Remove dependencies and clean node_modules links
 linkpm remove lodash axios
@@ -122,7 +131,41 @@ Patched packages are compiled into isolated, content-hashed store paths (`lodash
 
 ---
 
-### 3. Monorepos & Workspace Orchestration
+### 3. Mobile & React Native Support (Metro Bundler & Native Builds)
+
+The React Native Metro bundler uses `fs.realpath` during module resolution, which can trigger `"Unable to resolve module react"` when packages reside in global store junctions. LinkPM provides two concrete features to solve this:
+
+#### Option A: Configurable Linker Modes (`linker = hoisted`)
+Set `linker = hoisted` in `.linkpmrc` or `package.json`, or pass `--linker hoisted`:
+
+```ini
+# .linkpmrc
+linker = hoisted   # Classic flat node_modules (copies/hardlinks) for React Native, CocoaPods, and Gradle
+# linker = junction # Default: zero-copy store junctions (best for Web & Backend)
+```
+
+```bash
+# Install dependencies with flat hoisted node_modules
+linkpm install --linker hoisted
+linkpm add react-native --linker hoisted
+```
+
+When `linker = hoisted` is enabled, LinkPM still uses its fast DAG resolver, but places packages flat in `node_modules/` (identical to standard npm layout). Metro, CocoaPods (iOS), and Gradle (Android) work 100% out of the box with zero custom metro configuration!
+
+#### Option B: Zero-Copy Metro Helper (`linkpm metro-init`)
+For developers who want to keep instant zero-copy store speeds in React Native:
+
+```bash
+linkpm metro-init
+```
+
+This automatically configures `metro.config.js`:
+- Injects `watchFolders: [linkpmStorePath]` to watch central store packages.
+- Enables `resolver.unstable_enableSymlinks: true` and maps project `nodeModulesPaths`.
+
+---
+
+### 4. Monorepos & Workspace Orchestration
 
 LinkPM natively recognizes `pnpm-workspace.yaml` and `package.json` `"workspaces"`:
 
@@ -145,7 +188,7 @@ linkpm run --filter "*ui*" build
 
 ---
 
-### 4. Lifecycle Scripts & Binary Execution
+### 5. Lifecycle Scripts & Binary Execution
 
 ```bash
 # Run any package.json script (with pre/post lifecycle hooks and .bin PATH injection)
@@ -168,7 +211,7 @@ linkpm dlx degit user/repo my-app
 
 ---
 
-### 5. Managing Central Global Store & Garbage Collection
+### 6. Managing Central Global Store & Garbage Collection
 
 ```bash
 # View central store location, unique packages, versions, and total disk size
@@ -231,11 +274,15 @@ linkpm preset list
 
 ---
 
-### 7. Diagnostics, Auditing & Dependency Insights
+### 7. Diagnostics, IDE Setup & Auditing
 
 ```bash
-# Validate Node.js version, NTFS junction capability, and store health
+# Validate Node.js version, NTFS junction capability, store health, and IDE LSP setup
 linkpm doctor
+linkpm doctor --fix   # Automatically repairs and configures IDE settings (.vscode/settings.json, tsconfig.json)
+
+# Optimize VS Code, Cursor, and WebStorm TypeScript Language Server (LSP) for zero-copy junctions
+linkpm ide-init
 
 # Print Unicode ASCII dependency graph
 linkpm tree
@@ -246,8 +293,9 @@ linkpm why lodash
 # Check which installed packages have newer versions available
 linkpm outdated
 
-# Run vulnerability scan across installed dependencies
+# Run vulnerability scan across installed dependencies (text, JSON, or SARIF for GitHub Security)
 linkpm audit
+linkpm audit --format sarif -o audit.sarif
 ```
 
 ---

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { cac } from 'cac';
 import pc from 'picocolors';
 import { ensureDirectories, getStoreDir, setStoreDir } from './config/index.js';
@@ -16,7 +17,8 @@ import { scaffoldProject } from './scaffolder.js';
 import { runApproveBuilds } from './scripts/approve.js';
 import { runDoctor, printDoctorResults } from './diagnostics/doctor.js';
 import { checkOutdated, printOutdatedTable } from './diagnostics/outdated.js';
-import { runSecurityAudit, printAuditResults } from './diagnostics/audit.js';
+import { runSecurityAudit, printAuditResults, formatSarifReport } from './diagnostics/audit.js';
+import { importLockfile, syncNpmPackageLock, readLockfile } from './lockfile/index.js';
 import { DependencyResolver } from './resolver/index.js';
 import { runScript, execBin, runDlx } from './scripts/index.js';
 import { LinkPMError } from './utils/errors.js';
@@ -34,6 +36,9 @@ import {
   removeAICapabilityFromConfigs
 } from './ai/index.js';
 import { deployProject } from './deploy.js';
+import { initMetroConfig } from './metro/index.js';
+import { initIdeConfig } from './ide/index.js';
+import type { LinkerMode } from './config/npmrc.js';
 
 const cli = cac('linkpm');
 
@@ -96,9 +101,10 @@ cli
   .option('-P, --preset <presetName>', 'Specify a preset to install')
   .option('--offline', 'Force offline mode (use only cached packages)')
   .option('--prefer-offline', 'Prefer cached packages in store if available')
+  .option('--linker <mode>', 'Linker mode: junction (zero-copy default) or hoisted (flat node_modules for React Native)')
   .option('--ai', 'Enable automatic AI capability discovery (MCP servers, agent skills)')
   .option('-y, --yes', 'Automatically confirm prompts without interactive questions')
-  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; ai?: boolean; yes?: boolean }) => {
+  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; linker?: LinkerMode; ai?: boolean; yes?: boolean }) => {
     const projectRoot = findProjectRoot();
 
     // If --preset was passed
@@ -156,6 +162,7 @@ cli
   .alias('i')
   .option('--offline', 'Force offline mode (use only cached packages)')
   .option('--prefer-offline', 'Prefer cached packages in store if available')
+  .option('--linker <mode>', 'Linker mode: junction (zero-copy default) or hoisted (flat node_modules for React Native)')
   .option('--frozen', 'Strictly verify lockfile against package.json without modifying it (CI mode)')
   .option('--frozen-lockfile', 'Fail installation if lockfile is out of date')
   .option('--no-prune', 'Do not prune extraneous packages from node_modules')
@@ -166,6 +173,7 @@ cli
   .action(async (options: {
     offline?: boolean;
     preferOffline?: boolean;
+    linker?: LinkerMode;
     frozen?: boolean;
     frozenLockfile?: boolean;
     noPrune?: boolean;
@@ -185,12 +193,14 @@ cli
 cli
   .command('ci', 'Install exact locked dependencies from linkpm-lock.json')
   .option('--offline', 'Force offline mode')
+  .option('--linker <mode>', 'Linker mode: junction (zero-copy default) or hoisted (flat node_modules for React Native)')
   .option('--frozen', 'Strictly verify lockfile against package.json')
   .option('--frozen-lockfile', 'Strictly verify lockfile against package.json')
   .option('--no-prune', 'Do not prune extraneous packages')
   .option('--ignore-scripts', 'Do not run package install/postinstall lifecycle scripts')
   .action(async (options: {
     offline?: boolean;
+    linker?: LinkerMode;
     frozen?: boolean;
     frozenLockfile?: boolean;
     noPrune?: boolean;
@@ -439,9 +449,10 @@ cli
 // 10. DOCTOR COMMAND
 cli
   .command('doctor', 'Perform environment and installation diagnostics')
-  .action(async () => {
+  .option('--fix', 'Automatically repair detected issues such as IDE settings and path mappings')
+  .action(async (options: { fix?: boolean }) => {
     const projectRoot = findProjectRoot();
-    const checks = await runDoctor(projectRoot);
+    const checks = await runDoctor(projectRoot, { fix: options.fix });
     printDoctorResults(checks);
   });
 
@@ -637,9 +648,35 @@ cli
 // 20. AUDIT COMMAND
 cli
   .command('audit', 'Run security audit on installed dependencies')
-  .action(async () => {
+  .option('--format <format>', 'Output format: "text", "json", or "sarif" (default: "text")')
+  .option('-o, --output <file>', 'Save audit report to file')
+  .action(async (options: { format?: string; output?: string }) => {
     const projectRoot = findProjectRoot();
     const result = await runSecurityAudit(projectRoot);
+    const fmt = (options.format || 'text').toLowerCase();
+
+    if (fmt === 'sarif') {
+      const sarifJson = formatSarifReport(result);
+      if (options.output) {
+        fs.writeFileSync(path.resolve(projectRoot, options.output), sarifJson + '\n', 'utf-8');
+        console.log(pc.green(`✔ SARIF report written to ${options.output}`));
+      } else {
+        console.log(sarifJson);
+      }
+      return;
+    }
+
+    if (fmt === 'json') {
+      const jsonStr = JSON.stringify(result, null, 2);
+      if (options.output) {
+        fs.writeFileSync(path.resolve(projectRoot, options.output), jsonStr + '\n', 'utf-8');
+        console.log(pc.green(`✔ JSON report written to ${options.output}`));
+      } else {
+        console.log(jsonStr);
+      }
+      return;
+    }
+
     printAuditResults(result);
   });
 
@@ -744,6 +781,75 @@ cli
     console.log(`  Packaged Dependencies: ${pc.bold(res.packagesCount.toString())} (real, unlinked files)`);
     console.log(`  Bundle Size:           ${pc.bold(mbSize)} MB`);
     console.log(pc.dim('Ready to deploy to AWS Lambda, Vercel Serverless, Docker, or Google Cloud Run.\n'));
+  });
+
+// 25. IMPORT-LOCK COMMAND (ENTERPRISE DEPENDABOT / LOCKFILE SYNC)
+cli
+  .command('import-lock [file]', 'Import an external package-lock.json and synchronize linkpm-lock.json in lockstep')
+  .alias('import-lockfile')
+  .action(async (file?: string) => {
+    const projectRoot = findProjectRoot();
+    console.log(pc.bold(pc.blue('⚡ linkpm import-lock:')) + ` Synchronizing dependencies from lockfile...`);
+    const res = importLockfile(projectRoot, file);
+    console.log(pc.bold(pc.green(`\n✔ Successfully imported ${res.importedCount} locked package(s) from ${pc.cyan(res.lockfilePath)}.`)));
+    console.log(pc.dim('Both linkpm-lock.json and package-lock.json are now in synchronized lockstep.\n'));
+  });
+
+// 26. EXPORT-LOCK COMMAND
+cli
+  .command('export-lock', 'Export and mirror standard npm package-lock.json (v3) from linkpm-lock.json')
+  .alias('export-lockfile')
+  .action(async () => {
+    const projectRoot = findProjectRoot();
+    const lock = readLockfile(projectRoot);
+    if (!lock) {
+      console.log(pc.yellow('No linkpm-lock.json found. Run "linkpm install" first.'));
+      return;
+    }
+    syncNpmPackageLock(projectRoot, lock);
+    console.log(pc.bold(pc.green('\n✔ Exported package-lock.json (v3) in sync with linkpm-lock.json.')));
+    console.log(pc.dim('Ready for Dependabot, Snyk, and Vercel/Netlify CI builds.\n'));
+  });
+
+// 27. METRO-INIT COMMAND (REACT NATIVE ZERO-COPY METRO HELPER)
+cli
+  .command('metro-init', 'Inject zero-copy store watchFolders and symlink resolution into metro.config.js for React Native')
+  .alias('metro')
+  .action(async () => {
+    const projectRoot = findProjectRoot();
+    console.log(pc.bold(pc.blue('⚡ linkpm metro-init:')) + ` Configuring React Native Metro bundler...`);
+    const res = initMetroConfig(projectRoot);
+    if (res.created || res.updated) {
+      console.log(pc.bold(pc.green(`\n✔ ${res.message}`)));
+      console.log(`  Target File:  ${pc.cyan(res.filePath)}`);
+      console.log(`  Store Folder: ${pc.cyan(res.storePath)}`);
+      console.log(`  Symlinks:     ${pc.green('enabled (resolver.unstable_enableSymlinks = true)')}`);
+      console.log(`  Node Modules: ${pc.green('mapped (resolver.nodeModulesPaths includes project node_modules)')}`);
+      console.log(pc.dim('\nReact Native Metro bundler is now ready to resolve zero-copy store packages directly!\n'));
+    } else {
+      console.log(pc.cyan(`\nℹ ${res.message}`));
+      console.log(`  Config File:  ${pc.dim(res.filePath)}`);
+      console.log(`  Store Folder: ${pc.dim(res.storePath)}\n`);
+    }
+  });
+
+// 28. IDE-INIT COMMAND (VS CODE, CURSOR & TYPESCRIPT LANGUAGE SERVER LSP)
+cli
+  .command('ide-init', 'Auto-configure VS Code, Cursor, and TypeScript LSP settings for zero-copy store junctions')
+  .alias('ide')
+  .alias('vscode')
+  .option('--plugin', 'Enable experimental linkpm-ts-plugin in tsconfig.json')
+  .action(async (options: { plugin?: boolean }) => {
+    const projectRoot = findProjectRoot();
+    console.log(pc.bold(pc.blue('⚡ linkpm ide-init:')) + ` Optimizing IDE & TypeScript Language Server settings...`);
+    const res = initIdeConfig(projectRoot, { enablePlugin: options.plugin });
+    console.log(pc.bold(pc.green(`\n✔ ${res.message}`)));
+    console.log(`  VS Code Settings: ${pc.cyan(res.vscodePath)}`);
+    console.log(`  TypeScript SDK:   ${pc.green('mapped (node_modules/typescript/lib)')}`);
+    if (res.tsconfigPath) {
+      console.log(`  TSConfig:         ${pc.cyan(res.tsconfigPath)} (preserveSymlinks = true)`);
+    }
+    console.log(pc.dim('\nVS Code, Cursor, and WebStorm will now follow store junctions seamlessly with full auto-completion and Go to Definition!\n'));
   });
 
 const getCliVersion = (): string => {

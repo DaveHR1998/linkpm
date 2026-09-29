@@ -277,3 +277,77 @@ export function verifyLockfileIntegrity(
   };
 }
 
+/**
+ * Imports an external standard lockfile (e.g. package-lock.json from a Dependabot PR)
+ * and synchronizes linkpm-lock.json and package-lock.json in lockstep.
+ */
+export function importLockfile(
+  projectRoot: string,
+  sourceLockfilePath?: string
+): { importedCount: number; lockfilePath: string } {
+  const filePath = sourceLockfilePath
+    ? path.resolve(projectRoot, sourceLockfilePath)
+    : path.join(projectRoot, 'package-lock.json');
+
+  if (!fs.existsSync(filePath)) {
+    throw new LinkPMError(`Lockfile to import not found at ${filePath}`, {
+      code: 'ERR_LOCKFILE_MISMATCH',
+      hint: 'Specify a valid package-lock.json path. Example: linkpm import-lock package-lock.json'
+    });
+  }
+
+  let raw: any;
+  try {
+    raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (err: any) {
+    throw new LinkPMError(`Failed to parse lockfile at ${filePath}: ${err.message}`, {
+      code: 'ERR_LOCKFILE_MISMATCH'
+    });
+  }
+
+  const currentLock: LockfileV2 = readLockfile(projectRoot) || { lockfileVersion: 2, packages: {} };
+  let importedCount = 0;
+
+  // Handle npm v2/v3 package-lock.json
+  if (raw.packages && typeof raw.packages === 'object') {
+    for (const [key, pkgInfo] of Object.entries<any>(raw.packages)) {
+      if (!key || key === '') continue; // Skip root project
+      const name = key.startsWith('node_modules/') ? key.slice('node_modules/'.length) : key;
+      if (!pkgInfo.version) continue;
+
+      const lockKey = `${name}@${pkgInfo.version}`;
+      currentLock.packages[lockKey] = {
+        version: pkgInfo.version,
+        resolved: pkgInfo.resolved || '',
+        integrity: pkgInfo.integrity,
+        isDev: Boolean(pkgInfo.dev),
+        isOptional: Boolean(pkgInfo.optional),
+        dependencies: pkgInfo.dependencies,
+        peerDependencies: pkgInfo.peerDependencies
+      };
+      importedCount++;
+    }
+  } else if (raw.dependencies && typeof raw.dependencies === 'object') {
+    // Handle npm v1 package-lock.json
+    for (const [name, pkgInfo] of Object.entries<any>(raw.dependencies)) {
+      if (!pkgInfo.version) continue;
+      const lockKey = `${name}@${pkgInfo.version}`;
+      currentLock.packages[lockKey] = {
+        version: pkgInfo.version,
+        resolved: pkgInfo.resolved || '',
+        integrity: pkgInfo.integrity,
+        isDev: Boolean(pkgInfo.dev),
+        dependencies: pkgInfo.requires
+      };
+      importedCount++;
+    }
+  }
+
+  writeLockfile(projectRoot, currentLock);
+
+  return {
+    importedCount,
+    lockfilePath: filePath
+  };
+}
+

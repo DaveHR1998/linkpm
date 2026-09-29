@@ -1,6 +1,10 @@
 import { LinkPMError } from './utils/errors.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import type { LinkerMode } from './config/npmrc.js';
+import { linkHoistedPackage } from './linker/hoisted.js';
+
+export * from './linker/hoisted.js';
 
 export interface LinkResult {
   packageName: string;
@@ -20,8 +24,13 @@ export function ensureNodeModules(projectRoot: string): string {
 export function linkPackage(
   projectRoot: string,
   packageName: string,
-  storePackageDir: string
+  storePackageDir: string,
+  options?: { linker?: LinkerMode }
 ): LinkResult {
+  if (options?.linker === 'hoisted') {
+    return linkHoistedPackage(projectRoot, packageName, storePackageDir);
+  }
+
   if (!fs.existsSync(storePackageDir)) {
     throw new LinkPMError(`Cannot link package "${packageName}": store directory "${storePackageDir}" does not exist`, {
       code: 'ERR_STORE_CORRUPTION',

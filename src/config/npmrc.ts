@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+export type LinkerMode = 'junction' | 'hoisted';
+
 export interface NpmrcConfig {
   registry: string;
   scopedRegistries: Record<string, string>;
@@ -11,6 +13,7 @@ export interface NpmrcConfig {
   proxy?: string;
   httpsProxy?: string;
   storeDir?: string;
+  linker: LinkerMode;
   minimumReleaseAge: number; // in milliseconds, default 24h
   releaseAgeExclude: string[];
   allowExoticTransitive: boolean;
@@ -39,7 +42,7 @@ export function parseNpmrcContent(content: string): Record<string, string> {
 export function loadNpmrc(projectRoot?: string): NpmrcConfig {
   const config: Record<string, string> = {};
 
-  // 1. User ~/.npmrc
+  // 1. User ~/.npmrc and ~/.linkpmrc
   const userNpmrc = path.join(os.homedir(), '.npmrc');
   if (fs.existsSync(userNpmrc)) {
     try {
@@ -47,13 +50,27 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
       Object.assign(config, parsed);
     } catch {}
   }
+  const userLinkpmrc = path.join(os.homedir(), '.linkpmrc');
+  if (fs.existsSync(userLinkpmrc)) {
+    try {
+      const parsed = parseNpmrcContent(fs.readFileSync(userLinkpmrc, 'utf-8'));
+      Object.assign(config, parsed);
+    } catch {}
+  }
 
-  // 2. Project .npmrc (overrides user)
+  // 2. Project .npmrc and .linkpmrc (overrides user)
   if (projectRoot) {
     const projectNpmrc = path.join(projectRoot, '.npmrc');
     if (fs.existsSync(projectNpmrc)) {
       try {
         const parsed = parseNpmrcContent(fs.readFileSync(projectNpmrc, 'utf-8'));
+        Object.assign(config, parsed);
+      } catch {}
+    }
+    const projectLinkpmrc = path.join(projectRoot, '.linkpmrc');
+    if (fs.existsSync(projectLinkpmrc)) {
+      try {
+        const parsed = parseNpmrcContent(fs.readFileSync(projectLinkpmrc, 'utf-8'));
         Object.assign(config, parsed);
       } catch {}
     }
@@ -120,6 +137,10 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
   // Parse allow-exotic-transitive
   const allowExoticTransitive = config['allow-exotic-transitive'] === 'true' || config['allow_exotic_transitive'] === 'true';
 
+  // Parse linker mode: 'junction' (default) or 'hoisted'
+  const rawLinker = config['linker'] || config['linkpm-linker'] || config['linkpm_linker'] || process.env.LINKPM_LINKER;
+  const linker: LinkerMode = rawLinker === 'hoisted' ? 'hoisted' : 'junction';
+
   return {
     registry,
     scopedRegistries,
@@ -129,6 +150,7 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
     proxy,
     httpsProxy,
     storeDir,
+    linker,
     minimumReleaseAge,
     releaseAgeExclude,
     allowExoticTransitive,
@@ -137,6 +159,46 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
 }
 
 export const loadNpmrcConfig = loadNpmrc;
+
+/**
+ * Resolves the active linker mode with precedence:
+ * 1. Explicit CLI flag (--linker)
+ * 2. Process environment variable (LINKPM_LINKER)
+ * 3. package.json ("linkpm": { "linker": "..." } or "linker": "...")
+ * 4. .linkpmrc / .npmrc config file
+ * 5. Default: 'junction'
+ */
+export function getLinkerMode(projectRoot?: string, cliOption?: string): LinkerMode {
+  if (cliOption === 'hoisted' || cliOption === 'junction') {
+    return cliOption;
+  }
+  if (process.env.LINKPM_LINKER === 'hoisted' || process.env.LINKPM_LINKER === 'junction') {
+    return process.env.LINKPM_LINKER;
+  }
+  if (projectRoot) {
+    try {
+      const pkgPath = path.join(projectRoot, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        const pkgLinker = pkg.linkpm?.linker || pkg.linker;
+        if (pkgLinker === 'hoisted' || pkgLinker === 'junction') {
+          return pkgLinker;
+        }
+      }
+    } catch {}
+
+    const npmrc = loadNpmrc(projectRoot);
+    if (npmrc.linker) {
+      return npmrc.linker;
+    }
+  } else {
+    const npmrc = loadNpmrc();
+    if (npmrc.linker) {
+      return npmrc.linker;
+    }
+  }
+  return 'junction';
+}
 
 
 export function getRegistryForPackage(packageName: string, npmrc: NpmrcConfig): string {

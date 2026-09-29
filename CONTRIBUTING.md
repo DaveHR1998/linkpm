@@ -81,14 +81,14 @@ The codebase is organized under `src/`:
 
 ## 🎯 Good First Issues for New Contributors
 
-If you are looking for a place to contribute, here are recommended areas:
+If you are looking for a place to contribute, we have prepared detailed specifications and acceptance criteria for 6 starter issues:
 
-1. **CLI Autocompletion (`linkpm completion`)**: Generate shell completion scripts for Bash, Zsh, and Fish.
-2. **Additional Lockfile Exporters (`linkpm convert`)**: Add bidirectional conversion support for `yarn.lock` (v1 and Berry) and `pnpm-lock.yaml`.
-3. **Enhanced Color Formatting in Windows Terminals**: Improve ANSI/Unicode fallback glyphs when running inside standard Windows `cmd.exe` vs Windows Terminal.
-4. **Offline Mode Validation**: Expand test coverage for `--offline` resolution to assert zero outbound network requests.
-5. **JSON Output for Doctor & Diagnostics**: Add `--json` flag to `linkpm doctor` and `linkpm diagnostics` for programmatic CI integration.
-6. **Progress Bar Customization**: Support quiet/minimal progress bars when running in CI environments (`CI=true`).
+1. [**CLI Autocompletion (`linkpm completion`)**](.github/good-first-issues/01-shell-autocompletion.md) ([Open on GitHub](https://github.com/DaveHR1998/linkpm/issues/new?title=feat%28cli%29%3A+shell+autocompletion+for+Bash%2C+Zsh%2C+and+Fish&labels=good+first+issue%2Cenhancement%2Ccli)): Generate shell completion scripts for Bash, Zsh, and Fish.
+2. [**Additional Lockfile Exporters (`linkpm convert`)**](.github/good-first-issues/02-lockfile-conversion.md) ([Open on GitHub](https://github.com/DaveHR1998/linkpm/issues/new?title=feat%28lockfile%29%3A+bidirectional+conversion+for+yarn.lock+and+pnpm-lock.yaml&labels=good+first+issue%2Cenhancement%2Clockfile)): Add bidirectional conversion support for `yarn.lock` (v1 and Berry) and `pnpm-lock.yaml`.
+3. [**Enhanced Color Formatting in Windows Terminals**](.github/good-first-issues/03-windows-terminal-glyphs.md) ([Open on GitHub](https://github.com/DaveHR1998/linkpm/issues/new?title=fix%28terminal%29%3A+improve+ANSI%2FUnicode+fallback+glyphs+in+standard+Windows+cmd.exe&labels=good+first+issue%2Cbug%2Cwindows)): Improve ANSI/Unicode fallback glyphs when running inside standard Windows `cmd.exe` vs Windows Terminal.
+4. [**Offline Mode Validation**](.github/good-first-issues/04-offline-test-suite.md) ([Open on GitHub](https://github.com/DaveHR1998/linkpm/issues/new?title=test%28offline%29%3A+add+zero-network+assertion+test+suite+for+--offline+mode&labels=good+first+issue%2Ctesting%2Creliability)): Expand test coverage for `--offline` resolution to assert zero outbound network requests.
+5. [**JSON Output for Doctor & Diagnostics**](.github/good-first-issues/05-diagnostics-json.md) ([Open on GitHub](https://github.com/DaveHR1998/linkpm/issues/new?title=feat%28diagnostics%29%3A+add+--json+flag+to+linkpm+doctor+and+linkpm+diagnostics&labels=good+first+issue%2Cenhancement%2Cdx)): Add `--json` flag to `linkpm doctor` and `linkpm diagnostics` for programmatic CI integration.
+6. [**Progress Bar Customization**](.github/good-first-issues/06-ci-quiet-progress.md) ([Open on GitHub](https://github.com/DaveHR1998/linkpm/issues/new?title=feat%28ui%29%3A+support+minimal%2Fquiet+progress+bar+when+CI%3Dtrue&labels=good+first+issue%2Cenhancement%2Cui)): Support quiet/minimal progress bars when running in CI environments (`CI=true`).
 
 ---
 

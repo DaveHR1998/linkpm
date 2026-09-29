@@ -2,7 +2,7 @@
   <img src="./linkpm.png" alt="LinkPM Logo" width="220" />
 </p>
 
-> **High-performance, production-grade JavaScript & TypeScript package manager powered by a global zero-copy store, isolated virtual dependency mapping, deterministic DAG resolution, transactional rollbacks, and monorepo workspace orchestration.**
+> **High-performance JavaScript & TypeScript package manager powered by a global zero-copy store, isolated virtual dependency mapping, deterministic DAG resolution, transactional rollbacks, and monorepo workspace orchestration.**
 
 [![npm version](https://img.shields.io/npm/v/linkpm.svg)](https://www.npmjs.com/package/linkpm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -12,9 +12,9 @@
 
 ## Core Capabilities
 
-LinkPM is engineered from the ground up for modern JavaScript and TypeScript development, delivering extreme speed, zero disk waste, and bulletproof project isolation:
+LinkPM is engineered for modern JavaScript and TypeScript development, delivering fast installations, disk deduplication, and project isolation:
 
-- **Global Zero-Copy Store**: Every package version is downloaded and verified with streaming SHA-512 checks **exactly once** in `~/.linkpm/store`. Subsequent installations in any project link in **sub-second time (5–25ms)**.
+- **Global Zero-Copy Store**: Every package version is downloaded and verified with streaming SHA-512 checks **exactly once** in `~/.linkpm/store`. Subsequent installations in any project link instantaneously via directory junctions and symlinks without redownloading.
 - **Windows NTFS Junctions & Cross-Drive Freedom**: Utilizes native Windows NTFS Directory Junctions without requiring Administrator privileges or Windows Developer Mode, alongside standard symlinks on Linux and macOS. Seamlessly operates across separate physical drives and dedicated SSD partitions (e.g. `C:` to `D:`).
 - **Project-Isolated Virtual Store (`.linkpm/`)**: Sub-dependencies are mapped inside project-local `node_modules/.linkpm/`, ensuring strict isolation between packages without phantom dependencies or cross-project version collisions.
 - **In-Place Store Poisoning Immunity**: Store package files are locked with recursive **read-only permissions** (`chmod 0o444` and NTFS `FILE_ATTRIBUTE_READONLY`), preventing accidental developer edits or build tools from mutating the shared global store.
@@ -90,6 +90,14 @@ linkpm rm express
 # Update dependencies against registry manifests
 linkpm update
 linkpm update express vite
+
+# Security: Inspect and approve package build scripts under default-deny
+linkpm approve-builds
+linkpm approve-builds -y
+
+# Security bypasses for urgent hotfixes & exotic sources
+linkpm install --ignore-release-age
+linkpm install --allow-exotic-transitive
 ```
 
 ---
@@ -184,6 +192,12 @@ linkpm store gc --days 7
 linkpm store gc --force
 linkpm store gc --all
 
+# Re-check and verify store integrity against tampering or bitrot
+linkpm store verify
+
+# Verify store and automatically repair corrupted packages from verified tarballs
+linkpm store verify --fix
+
 # Completely purge central store
 linkpm store clear
 ```
@@ -239,10 +253,10 @@ linkpm audit
 
 ### 8. AI Capability Discovery & Agent Tooling (MCP & Skills)
 
-LinkPM is the first package manager with native, zero-config awareness of **Model Context Protocol (MCP)** servers and **Agent Skills**. It bridges the gap between JavaScript/TypeScript package distribution and AI agent execution environments:
+LinkPM provides optional, security-hardened management for **Model Context Protocol (MCP)** servers and **Agent Skills** directly within the package lifecycle:
 
 ```bash
-# 1. Install an AI package with automatic capability discovery and multi-IDE wiring:
+# 1. Install an AI package with explicit capability opt-in:
 linkpm add notebooklm-mcp --ai
 linkpm add @modelcontextprotocol/server-postgres --ai
 
@@ -252,26 +266,20 @@ linkpm ai add notebooklm-mcp
 # 2. Inspect all active AI capabilities in the project:
 linkpm ai list
 
-# 3. Scan existing node_modules/ for AI capabilities and re-synchronize all IDE configs:
+# 3. Scan existing node_modules/ for AI capabilities and re-synchronize IDE configs:
 linkpm ai sync
 
 # 4. Remove an AI capability and clean up IDE configurations and skill junctions:
 linkpm ai remove notebooklm-mcp
 ```
 
-#### 🔍 Automatic Detection Heuristics
-LinkPM inspects installed packages without requiring manual plumbing or custom wrapper scripts:
-- **Official MCP Servers**: Automatically detects `@modelcontextprotocol/*` packages and wires their binary entry points (`dist/index.js`).
-- **Community MCP Servers**: Discovers community packages by name suffix (`*-mcp`, `*-mcp-*`), keyword tags (`"mcp"`, `"mcp-server"`), or direct dependencies on `@modelcontextprotocol/sdk` (e.g. `notebooklm-mcp`).
-- **Explicit Manifests**: Reads standard `mcp.json` or `package.json.ai` declarations specifying custom `command`, `args`, and `env` dictionaries.
-- **Agent Skills**: Discovers standard Agent Skill packages containing `skills/<skill_name>/SKILL.md` (with YAML frontmatter description parsing) and creates direct junctions in `.agents/skills/`.
-
-#### 🔄 Multi-IDE Zero-Touch Auto-Wiring
-Whenever an AI capability is installed or synced, LinkPM automatically generates and synchronizes configuration across all leading AI coding assistants:
-- **Cursor IDE**: Writes stdio server definitions into `.cursor/mcp.json`.
-- **Antigravity & Gemini**: Writes tool definitions into `mcp_config.json`.
-- **Workspace Agent Skills**: Symlinks/junctions skill folders into `.agents/skills/`.
-- **Project State Ledger**: Maintains a deterministic, version-controlled capability registry in `.linkpm/ai.json`.
+#### 🛡️ AI Security Model & Safeguards
+Running MCP servers allows AI IDEs to execute local processes with user privileges. LinkPM implements strict guardrails:
+- **Strictly Opt-In (Default-Off)**: Standard package installs (`linkpm install`, `linkpm ci`, `linkpm add foo`) **never** touch `.cursor/mcp.json`, `mcp_config.json`, or `.agents/skills/`. Only commands explicitly passing `--ai` or `linkpm ai add` will initiate capability discovery.
+- **Zero Transitive Wiring**: Only top-level packages explicitly specified by the developer are evaluated. Transitive dependencies are never registered.
+- **Interactive Verification**: Before modifying any IDE configuration, LinkPM displays a security notice, target config paths, and the exact command to be registered, requesting explicit user confirmation (`[y/N]`). In automated CI pipelines, registration is safely skipped unless `--yes` (`-y`) is supplied.
+- **Cryptographic Command Pinning**: Approved commands and arguments are hashed (SHA-256) and pinned in `.linkpm/ai.json`. If a future package update or dependency modifies the entry point, the hash mismatch flags the capability for re-approval.
+- **Secret Sanitization**: Ambient shell environment variables and secrets are never copied into project configuration files; safe placeholder strings are used instead.
 
 ---
 
@@ -310,11 +318,39 @@ Whenever an AI capability is installed or synced, LinkPM automatically generates
 
 ### Security & Integrity Highlights
 
+- **Default-Deny Lifecycle Scripts**: Package `install` and `postinstall` scripts are blocked by default. Scripts only run if allow-listed in `onlyBuiltDependencies` or approved via `linkpm approve-builds`.
+- **Release-Age Cooldown (`minimumReleaseAge`)**: Defaults to a 24-hour waiting window (`86400`s) for newly published package versions to protect against day-zero account takeovers. Urgent hotfixes can bypass via `--ignore-release-age`.
+- **Exotic Transitive Dependency Blocking**: Transitive dependencies requiring raw git URLs, tarballs, or local paths are blocked by default. Git dependencies pin exact commit SHAs.
+- **Store Integrity Re-Check (`linkpm store verify [--fix]`)**: Verifies stored files against stored SHA-512 hashes and automatically recovers corrupted packages from registry tarballs.
+- **Scoped Native Module Build Isolation**: Packages requiring native C/C++ builds are keyed by Node ABI, OS platform, and CPU architecture (`_abi<modules>_<platform>_<arch>`), preventing multi-Node version collisions.
 - **Cross-Process Concurrency Locks**: Atomic PID and timestamp-backed file locking (`FileLock`) prevents race conditions between parallel LinkPM processes.
 - **Zip-Slip Protection**: Tarball extraction explicitly validates archive paths to block directory traversal attacks (`../../`).
 - **Streaming SHA-512 Integrity**: Downloaded tarball buffers are verified against registry checksum manifests before extraction.
 - **In-Place Store Poisoning Defense**: Extracted package payloads are marked read-only, preventing edits in `node_modules` from altering shared global packages.
 - **Strict CI Lockfile Mode (`--frozen-lockfile`)**: Verifies that every dependency and resolved version in `linkpm-lock.json` matches `package.json` specifications with zero drift.
+
+---
+
+## 🧭 Tooling Compatibility (Running Outside `linkpm run`)
+
+Because packages link to the central store and virtual store topology without redundant copies, running development tools directly outside of `linkpm run` or generated `.bin` shims requires symlink awareness:
+
+| Tool / Runtime | Direct Invocation Command | Recommended Project Configuration |
+| :--- | :--- | :--- |
+| **Node.js (CJS & ESM)** | `node --preserve-symlinks --preserve-symlinks-main index.js` | Set `NODE_OPTIONS="--preserve-symlinks --preserve-symlinks-main"` in your environment or launch scripts. |
+| **TypeScript (`tsc`)** | `tsc --noEmit` | Set `"preserveSymlinks": true` or `"moduleResolution": "bundler"` (or `"node16"`/`"nodenext"`) in `tsconfig.json`. |
+| **Vite** | `vite dev` | In `vite.config.ts`: `export default defineConfig({ resolve: { preserveSymlinks: true } })`. |
+| **ESLint** | `eslint .` | Resolves standard plugins via project `node_modules/`. For flat config (`eslint.config.js`), no special flags needed. |
+| **Jest / Vitest** | `jest` / `vitest` | Vitest respects `resolve.preserveSymlinks` from `vite.config.ts`. In Jest, configure `moduleDirectories: ['node_modules']`. |
+| **Webpack** | `webpack --mode development` | In `webpack.config.js`: `resolve: { symlinks: false }`. |
+
+---
+
+## ⚠️ Roadmap & Planned Enhancements
+
+- **File-Level Deduplication**: Store deduplication currently operates at the version directory boundary. Content-addressable storage (CAS) with hardlink deduplication across disparate patch versions is under active development.
+- **Hoisted Linker Mode**: Certain tooling frameworks (such as React Native / Metro bundler and Electron packagers) expect a flat, hoisted `node_modules` layout. A configurable `node-linker = hoisted` mode is planned for these specialized toolchains.
+- **CLI Shell Autocompletion**: Tab autocompletion for Bash, Zsh, and Fish.
 
 ---
 

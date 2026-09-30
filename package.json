@@ -11,7 +11,8 @@
     "dist",
     "README.md",
     "LICENSE",
-    "linkpm.png"
+    "linkpm.png",
+    "skills"
   ],
   "scripts": {
     "build": "tsup",

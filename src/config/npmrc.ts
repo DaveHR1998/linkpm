@@ -13,7 +13,7 @@ export interface NpmrcConfig {
   proxy?: string;
   httpsProxy?: string;
   storeDir?: string;
-  linker: LinkerMode;
+  linker?: LinkerMode;
   minimumReleaseAge: number; // in milliseconds, default 24h
   releaseAgeExclude: string[];
   allowExoticTransitive: boolean;
@@ -137,9 +137,9 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
   // Parse allow-exotic-transitive
   const allowExoticTransitive = config['allow-exotic-transitive'] === 'true' || config['allow_exotic_transitive'] === 'true';
 
-  // Parse linker mode: 'junction' (default) or 'hoisted'
+  // Parse linker mode: 'junction' or 'hoisted'
   const rawLinker = config['linker'] || config['linkpm-linker'] || config['linkpm_linker'] || process.env.LINKPM_LINKER;
-  const linker: LinkerMode = rawLinker === 'hoisted' ? 'hoisted' : 'junction';
+  const linker: LinkerMode | undefined = rawLinker === 'hoisted' ? 'hoisted' : (rawLinker === 'junction' ? 'junction' : undefined);
 
   return {
     registry,

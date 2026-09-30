@@ -376,12 +376,22 @@ export function pruneExtraneousDependencies(projectRoot: string, linkerMode?: Li
 
   const mode = linkerMode || getLinkerMode(projectRoot);
   if (mode === 'hoisted') {
-    // In hoisted mode, preserve direct dependencies as well as transitive dependencies tracked in lockfile
+    // In hoisted mode, all locked dependencies and their transitive deps are legitimately present in node_modules
     const lock = readLockfile(projectRoot);
     if (lock && lock.packages) {
       for (const key of Object.keys(lock.packages)) {
         const atIdx = key.lastIndexOf('@');
         const pkgName = atIdx > 0 ? key.slice(0, atIdx) : key;
+        declared.add(pkgName);
+      }
+    }
+
+    const virtualStore = path.join(nmDir, '.linkpm');
+    if (fs.existsSync(virtualStore)) {
+      for (const entry of fs.readdirSync(virtualStore)) {
+        const atIdx = entry.lastIndexOf('@');
+        const rawName = atIdx > 0 ? entry.slice(0, atIdx) : entry;
+        const pkgName = rawName.includes('__') ? rawName.replace('__', '/') : rawName;
         declared.add(pkgName);
       }
     }

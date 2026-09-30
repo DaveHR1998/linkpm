@@ -51,13 +51,16 @@ linkpm add -D <package-name>
 linkpm remove <package-name>
 ```
 
-### 2. Mobile & React Native (Metro Bundler)
-Metro bundler and React Native CLI historically struggle with non-standard symlinks.
+### 2. Linker Modes & Mobile / React Native
+LinkPM uses **hoisted mode by default**, creating a flat, hardlinked `node_modules/` that guarantees 100% compatibility with Node.js module resolution, Express, Webpack, Metro, and CocoaPods:
 ```bash
-# Hoisted linker mode: creates flat node_modules with real directories
-linkpm install --linker hoisted
+# Default mode is already hoisted (flat node_modules layout)
+linkpm install
 
-# Automatically configure metro.config.js with watchFolders & symlink resolution
+# Strict isolated mode (NTFS junctions on Windows / symlinks on Unix)
+linkpm install --linker junction
+
+# Automatically configure metro.config.js for React Native symlinks if needed
 linkpm metro-init
 ```
 

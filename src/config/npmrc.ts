@@ -161,12 +161,56 @@ export function loadNpmrc(projectRoot?: string): NpmrcConfig {
 export const loadNpmrcConfig = loadNpmrc;
 
 /**
+ * Known frameworks and tools whose module resolution or bundling engines
+ * fail with directory junctions/symlinks and require flat hoisted node_modules.
+ */
+export const HOISTED_FRAMEWORK_TRIGGERS = [
+  'express',
+  'react-native',
+  '@react-native',
+  'expo',
+  '@expo',
+  '@nestjs',
+  'next',
+  'nuxt',
+  'webpack',
+  'fastify',
+  'koa',
+  '@types/express',
+  'metro'
+];
+
+/**
+ * Checks if the project contains dependencies indicating Node/Express/React Native/Metro
+ * or other frameworks that require flat hoisted node_modules layout.
+ */
+export function isHoistedFrameworkProject(projectRoot?: string): boolean {
+  if (!projectRoot) return false;
+  try {
+    const pkgPath = path.join(projectRoot, 'package.json');
+    if (!fs.existsSync(pkgPath)) return false;
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    const allDeps = {
+      ...(pkg.dependencies || {}),
+      ...(pkg.devDependencies || {}),
+      ...(pkg.peerDependencies || {})
+    };
+    return HOISTED_FRAMEWORK_TRIGGERS.some(trigger => {
+      return Object.keys(allDeps).some(dep => dep === trigger || dep.startsWith(trigger + '/') || dep.startsWith('@' + trigger));
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolves the active linker mode with precedence:
  * 1. Explicit CLI flag (--linker)
  * 2. Process environment variable (LINKPM_LINKER)
  * 3. package.json ("linkpm": { "linker": "..." } or "linker": "...")
  * 4. .linkpmrc / .npmrc config file
- * 5. Default: 'junction'
+ * 5. Auto-detected for Node/Express/React Native/Expo frameworks
+ * 6. Default: 'hoisted' (safe, flat, cross-platform default for all projects)
  */
 export function getLinkerMode(projectRoot?: string, cliOption?: string): LinkerMode {
   if (cliOption === 'hoisted' || cliOption === 'junction') {
@@ -184,6 +228,11 @@ export function getLinkerMode(projectRoot?: string, cliOption?: string): LinkerM
         if (pkgLinker === 'hoisted' || pkgLinker === 'junction') {
           return pkgLinker;
         }
+
+        // Auto-detect frameworks that require flat hoisted layout (Express, React Native, etc.)
+        if (isHoistedFrameworkProject(projectRoot)) {
+          return 'hoisted';
+        }
       }
     } catch {}
 
@@ -197,7 +246,9 @@ export function getLinkerMode(projectRoot?: string, cliOption?: string): LinkerM
       return npmrc.linker;
     }
   }
-  return 'junction';
+
+  // Default to 'hoisted' for universal cross-platform runtime & framework compatibility
+  return 'hoisted';
 }
 
 

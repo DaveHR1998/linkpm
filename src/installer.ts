@@ -376,10 +376,10 @@ export function pruneExtraneousDependencies(projectRoot: string, linkerMode?: Li
 
   const mode = linkerMode || getLinkerMode(projectRoot);
   if (mode === 'hoisted') {
-    // In hoisted mode, all locked dependencies and their transitive deps are legitimately present in node_modules
-    const lockfile = readLockfile(projectRoot);
-    if (lockfile && lockfile.packages) {
-      for (const key of Object.keys(lockfile.packages)) {
+    // In hoisted mode, preserve direct dependencies as well as transitive dependencies tracked in lockfile
+    const lock = readLockfile(projectRoot);
+    if (lock && lock.packages) {
+      for (const key of Object.keys(lock.packages)) {
         const atIdx = key.lastIndexOf('@');
         const pkgName = atIdx > 0 ? key.slice(0, atIdx) : key;
         declared.add(pkgName);
@@ -498,7 +498,8 @@ export async function installProjectDependencies(
   }
 
   // Prune extraneous packages if not disabled
-  if (!options.noPrune) {
+  const shouldPrune = !options.noPrune && (options as any).prune !== false;
+  if (shouldPrune) {
     const pruned = pruneExtraneousDependencies(projectRoot, linkerMode);
     if (pruned.length > 0) {
       console.log(pc.dim(`\n  🧹 Pruned ${pruned.length} extraneous package(s) from node_modules: ${pruned.join(', ')}`));
@@ -542,7 +543,8 @@ export async function installFromLockfile(
   const specs = entries.map(([key]) => key);
   const results = await installPackages(specs, projectRoot, installOpts);
 
-  if (!options.noPrune) {
+  const shouldPruneCi = !options.noPrune && (options as any).prune !== false;
+  if (shouldPruneCi) {
     const pruned = pruneExtraneousDependencies(projectRoot, linkerMode);
     if (pruned.length > 0) {
       console.log(pc.dim(`  🧹 Pruned ${pruned.length} extraneous package(s): ${pruned.join(', ')}`));

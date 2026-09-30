@@ -13,23 +13,29 @@ test('Mobile & React Native: getLinkerMode precedence and configuration', () => 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'linkpm-linker-test-'));
 
   try {
-    // 1. Default fallback is junction
-    assert.equal(getLinkerMode(tmpDir), 'junction');
-
-    // 2. .linkpmrc config file: linker = hoisted
-    const linkpmrcPath = path.join(tmpDir, '.linkpmrc');
-    fs.writeFileSync(linkpmrcPath, 'linker = hoisted\n', 'utf-8');
+    // 1. Default fallback is hoisted (flat cross-platform layout)
     assert.equal(getLinkerMode(tmpDir), 'hoisted');
+
+    // 1b. Auto-detection for Express / React Native in package.json
+    const expressAppDir = path.join(tmpDir, 'express-app');
+    fs.mkdirSync(expressAppDir, { recursive: true });
+    fs.writeFileSync(path.join(expressAppDir, 'package.json'), JSON.stringify({ name: 'api', dependencies: { express: '^5.0.0' } }), 'utf-8');
+    assert.equal(getLinkerMode(expressAppDir), 'hoisted');
+
+    // 2. .linkpmrc config file: linker = junction overrides default
+    const linkpmrcPath = path.join(tmpDir, '.linkpmrc');
+    fs.writeFileSync(linkpmrcPath, 'linker = junction\n', 'utf-8');
+    assert.equal(getLinkerMode(tmpDir), 'junction');
     fs.unlinkSync(linkpmrcPath);
 
-    // 3. package.json linkpm.linker = hoisted
+    // 3. package.json linkpm.linker = junction
     const pkgPath = path.join(tmpDir, 'package.json');
-    fs.writeFileSync(pkgPath, JSON.stringify({ name: 'test-app', linkpm: { linker: 'hoisted' } }), 'utf-8');
-    assert.equal(getLinkerMode(tmpDir), 'hoisted');
+    fs.writeFileSync(pkgPath, JSON.stringify({ name: 'test-app', linkpm: { linker: 'junction' } }), 'utf-8');
+    assert.equal(getLinkerMode(tmpDir), 'junction');
 
-    // 4. package.json top-level linker = hoisted
-    fs.writeFileSync(pkgPath, JSON.stringify({ name: 'test-app', linker: 'hoisted' }), 'utf-8');
-    assert.equal(getLinkerMode(tmpDir), 'hoisted');
+    // 4. package.json top-level linker = junction
+    fs.writeFileSync(pkgPath, JSON.stringify({ name: 'test-app', linker: 'junction' }), 'utf-8');
+    assert.equal(getLinkerMode(tmpDir), 'junction');
 
     // 5. Explicit CLI option overrides package.json
     assert.equal(getLinkerMode(tmpDir, 'junction'), 'junction');

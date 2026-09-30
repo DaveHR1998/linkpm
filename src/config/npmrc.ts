@@ -209,8 +209,7 @@ export function isHoistedFrameworkProject(projectRoot?: string): boolean {
  * 2. Process environment variable (LINKPM_LINKER)
  * 3. package.json ("linkpm": { "linker": "..." } or "linker": "...")
  * 4. .linkpmrc / .npmrc config file
- * 5. Auto-detected for Node/Express/React Native/Expo frameworks
- * 6. Default: 'hoisted' (safe, flat, cross-platform default for all projects)
+ * 5. Default: 'junction' (zero-copy central store with NTFS junctions / symlinks)
  */
 export function getLinkerMode(projectRoot?: string, cliOption?: string): LinkerMode {
   if (cliOption === 'hoisted' || cliOption === 'junction') {
@@ -228,11 +227,6 @@ export function getLinkerMode(projectRoot?: string, cliOption?: string): LinkerM
         if (pkgLinker === 'hoisted' || pkgLinker === 'junction') {
           return pkgLinker;
         }
-
-        // Auto-detect frameworks that require flat hoisted layout (Express, React Native, etc.)
-        if (isHoistedFrameworkProject(projectRoot)) {
-          return 'hoisted';
-        }
       }
     } catch {}
 
@@ -247,8 +241,8 @@ export function getLinkerMode(projectRoot?: string, cliOption?: string): LinkerM
     }
   }
 
-  // Default to 'hoisted' for universal cross-platform runtime & framework compatibility
-  return 'hoisted';
+  // Default to 'junction' for zero-copy central store linking and instant disk space savings
+  return 'junction';
 }
 
 

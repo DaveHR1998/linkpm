@@ -11,7 +11,7 @@ import {
   isNativePackage,
   getNativeAbiSuffix
 } from './store.js';
-import { linkPackage, unlinkPackage, type LinkResult, hoistDependencies, type HoistDependencyItem } from './linker.js';
+import { linkPackage, unlinkPackage, type LinkResult, hoistDependencies, hoistJunctions, type HoistDependencyItem } from './linker.js';
 import { createVirtualPackage, computePeerContextHash } from './linker/virtual-store.js';
 import {
   addDependenciesToPackageJson,
@@ -184,6 +184,31 @@ export async function ensurePackageInStore(
     );
   }
 
+  // Link dependencies in store package directory so Node.js runtime resolution in backend apps (Express)
+  // finds dependencies even when Windows kernel dereferences junctions to their realpath in ~/.linkpm/store
+  if (Object.keys(resolvedDeps).length > 0) {
+    const storeNm = path.join(storeDir, 'node_modules');
+    if (!fs.existsSync(storeNm)) fs.mkdirSync(storeNm, { recursive: true });
+    const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+    for (const [depName, depTargetDir] of Object.entries(resolvedDeps)) {
+      if (!depTargetDir || !fs.existsSync(depTargetDir)) continue;
+      let depLinkPath: string;
+      if (depName.startsWith('@')) {
+        const [scope, subName] = depName.split('/');
+        const scopeDir = path.join(storeNm, scope);
+        if (!fs.existsSync(scopeDir)) fs.mkdirSync(scopeDir, { recursive: true });
+        depLinkPath = path.join(scopeDir, subName);
+      } else {
+        depLinkPath = path.join(storeNm, depName);
+      }
+      if (!fs.existsSync(depLinkPath)) {
+        try {
+          fs.symlinkSync(depTargetDir, depLinkPath, linkType);
+        } catch {}
+      }
+    }
+  }
+
   // Create isolated virtual package mapping inside project's node_modules/.linkpm/
   const contextHash = computePeerContextHash(resolved.peerDependencies);
   const virtualRes = createVirtualPackage({
@@ -229,9 +254,14 @@ export async function installSinglePackage(
     { linker: linkerMode }
   );
 
-  // In hoisted linker mode, hoist all transitive dependencies flatly into node_modules/
+  // In hoisted linker mode, hoist all transitive dependencies flatly into node_modules/ (real copy/hardlink)
   if (linkerMode === 'hoisted' && Array.isArray(transitiveDeps) && transitiveDeps.length > 0) {
     hoistDependencies(projectRoot, transitiveDeps);
+  }
+
+  // In junction mode, hoist transitive dependencies as zero-copy flat junctions directly into node_modules/
+  if (linkerMode === 'junction' && Array.isArray(transitiveDeps) && transitiveDeps.length > 0) {
+    hoistJunctions(projectRoot, transitiveDeps);
   }
 
   // Discover and register AI capabilities ONLY IF explicitly opted-in via options.ai
@@ -374,10 +404,8 @@ export function pruneExtraneousDependencies(projectRoot: string, linkerMode?: Li
     ...Object.keys(pkg.peerDependencies || {})
   ]);
 
-  const mode = linkerMode || getLinkerMode(projectRoot);
-  if (mode === 'hoisted') {
-    // In hoisted mode, all locked dependencies and their transitive deps are legitimately present in node_modules
-    const lock = readLockfile(projectRoot);
+  // Preserve locked dependencies and their transitive deps in both junction and hoisted modes
+  const lock = readLockfile(projectRoot);
     if (lock && lock.packages) {
       for (const key of Object.keys(lock.packages)) {
         const atIdx = key.lastIndexOf('@');
@@ -395,7 +423,6 @@ export function pruneExtraneousDependencies(projectRoot: string, linkerMode?: Li
         declared.add(pkgName);
       }
     }
-  }
 
   const pruned: string[] = [];
   const entries = fs.readdirSync(nmDir, { withFileTypes: true });

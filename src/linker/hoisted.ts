@@ -178,3 +178,42 @@ export function hoistDependencies(
 
   return hoistedCount;
 }
+
+/**
+ * Hoists resolved transitive dependencies as zero-copy NTFS junctions (Windows) or symlinks (Unix)
+ * directly into the project's root node_modules directory.
+ * This satisfies Node.js native runtime resolution without copying any physical files.
+ */
+export function hoistJunctions(
+  projectRoot: string,
+  dependencies: HoistDependencyItem[]
+): number {
+  const nodeModulesDir = ensureNodeModules(projectRoot);
+  let linkedCount = 0;
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+
+  for (const dep of dependencies) {
+    if (!dep.storeDir || !fs.existsSync(dep.storeDir)) continue;
+
+    let targetDir: string;
+    if (dep.name.startsWith('@')) {
+      const [scope, pkgName] = dep.name.split('/');
+      const scopeDir = path.join(nodeModulesDir, scope);
+      if (!fs.existsSync(scopeDir)) fs.mkdirSync(scopeDir, { recursive: true });
+      targetDir = path.join(scopeDir, pkgName);
+    } else {
+      targetDir = path.join(nodeModulesDir, dep.name);
+    }
+
+    if (fs.existsSync(targetDir)) continue;
+
+    try {
+      safeRemoveLinkOrDir(targetDir);
+      fs.symlinkSync(dep.storeDir, targetDir, linkType);
+      linkedCount++;
+      linkBinaries(projectRoot, dep.name, dep.storeDir);
+    } catch {}
+  }
+
+  return linkedCount;
+}

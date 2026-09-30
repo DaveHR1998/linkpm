@@ -52,13 +52,13 @@ linkpm remove <package-name>
 ```
 
 ### 2. Linker Modes & Mobile / React Native
-LinkPM uses **hoisted mode by default**, creating a flat, hardlinked `node_modules/` that guarantees 100% compatibility with Node.js module resolution, Express, Webpack, Metro, and CocoaPods:
+LinkPM uses **junction mode by default**, creating zero-copy NTFS junctions (Windows) or symlinks (macOS/Linux) that point directly into `~/.linkpm/store/` without duplicating disk space:
 ```bash
-# Default mode is already hoisted (flat node_modules layout)
+# Default mode: zero-copy junctions (0 MB disk bloat in project)
 linkpm install
 
-# Strict isolated mode (NTFS junctions on Windows / symlinks on Unix)
-linkpm install --linker junction
+# Hoisted linker mode: creates flat physical node_modules for React Native / Metro
+linkpm install --linker hoisted
 
 # Automatically configure metro.config.js for React Native symlinks if needed
 linkpm metro-init

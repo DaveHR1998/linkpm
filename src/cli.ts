@@ -101,7 +101,7 @@ cli
   .option('-P, --preset <presetName>', 'Specify a preset to install')
   .option('--offline', 'Force offline mode (use only cached packages)')
   .option('--prefer-offline', 'Prefer cached packages in store if available')
-  .option('--linker <mode>', 'Linker mode: hoisted (flat cross-platform default) or junction (isolated virtual store)')
+  .option('--linker <mode>', 'Linker mode: junction (zero-copy default) or hoisted (flat node_modules for React Native)')
   .option('--ai', 'Enable automatic AI capability discovery (MCP servers, agent skills)')
   .option('-y, --yes', 'Automatically confirm prompts without interactive questions')
   .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; linker?: LinkerMode; ai?: boolean; yes?: boolean }) => {
@@ -162,7 +162,7 @@ cli
   .alias('i')
   .option('--offline', 'Force offline mode (use only cached packages)')
   .option('--prefer-offline', 'Prefer cached packages in store if available')
-  .option('--linker <mode>', 'Linker mode: hoisted (flat cross-platform default) or junction (isolated virtual store)')
+  .option('--linker <mode>', 'Linker mode: junction (zero-copy default) or hoisted (flat node_modules for React Native)')
   .option('--frozen', 'Strictly verify lockfile against package.json without modifying it (CI mode)')
   .option('--frozen-lockfile', 'Fail installation if lockfile is out of date')
   .option('--no-prune', 'Do not prune extraneous packages from node_modules')
@@ -193,7 +193,7 @@ cli
 cli
   .command('ci', 'Install exact locked dependencies from linkpm-lock.json')
   .option('--offline', 'Force offline mode')
-  .option('--linker <mode>', 'Linker mode: hoisted (flat cross-platform default) or junction (isolated virtual store)')
+  .option('--linker <mode>', 'Linker mode: junction (zero-copy default) or hoisted (flat node_modules for React Native)')
   .option('--frozen', 'Strictly verify lockfile against package.json')
   .option('--frozen-lockfile', 'Strictly verify lockfile against package.json')
   .option('--no-prune', 'Do not prune extraneous packages')

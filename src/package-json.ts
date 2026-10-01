@@ -50,14 +50,52 @@ export function writePackageJson(projectRoot: string, data: ProjectPackageJson):
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
 }
 
+/**
+ * Returns the exact spec string the user originally declared so it can be
+ * written back to package.json verbatim when it is a non-registry spec
+ * (workspace:, file:, link:, git:, tarball, catalog:, npm: alias).
+ * Plain registry adds use "^<version>" save-prefix semantics like npm.
+ */
+export function specForWriteback(declaredSpec: string, resolvedVersion: string): string {
+  const trimmed = (declaredSpec || '').trim();
+
+  // Spec forms like "name@<range>" or "alias@npm:real@range"
+  const atIdx = trimmed.startsWith('@')
+    ? trimmed.indexOf('@', 1)
+    : trimmed.indexOf('@');
+  const declaredRange = atIdx !== -1 ? trimmed.slice(atIdx + 1) : '';
+
+  if (
+    declaredRange.startsWith('workspace:') ||
+    declaredRange.startsWith('file:') ||
+    declaredRange.startsWith('link:') ||
+    declaredRange.startsWith('git+') ||
+    declaredRange.startsWith('git://') ||
+    declaredRange.startsWith('github:') ||
+    declaredRange.startsWith('catalog:') ||
+    declaredRange.includes('npm:') ||
+    /^https?:\/\//.test(declaredRange)
+  ) {
+    return declaredRange;
+  }
+
+  return `^${resolvedVersion}`;
+}
+
 export function addDependenciesToPackageJson(
   projectRoot: string,
-  deps: Array<{ name: string; version: string; isDev: boolean }>
+  deps: Array<{ name: string; version: string; isDev: boolean; declaredSpec?: string }>,
+  options: { saveExact?: boolean } = {}
 ): void {
   const pkg = readPackageJson(projectRoot);
 
   for (const dep of deps) {
-    const versionSpec = `^${dep.version}`;
+    let versionSpec: string;
+    if (dep.declaredSpec && specForWriteback(dep.declaredSpec, dep.version) !== `^${dep.version}`) {
+      versionSpec = specForWriteback(dep.declaredSpec, dep.version);
+    } else {
+      versionSpec = options.saveExact ? dep.version : `^${dep.version}`;
+    }
     if (dep.isDev) {
       if (!pkg.devDependencies) pkg.devDependencies = {};
       pkg.devDependencies[dep.name] = versionSpec;

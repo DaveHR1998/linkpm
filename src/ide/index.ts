@@ -28,7 +28,7 @@ function parseJsonWithComments(content: string): any {
  */
 export function initIdeConfig(
   projectRoot: string,
-  options: { enablePlugin?: boolean } = {}
+  options: { enablePlugin?: boolean; enableDiagnostics?: boolean } = {}
 ): IdeInitResult {
   let vscodeCreated = false;
   let vscodeUpdated = false;
@@ -56,9 +56,13 @@ export function initIdeConfig(
   const desiredSettings: Record<string, any> = {
     'typescript.tsdk': 'node_modules/typescript/lib',
     'typescript.preferences.includePackageJsonAutoImports': 'auto',
-    'typescript.tsserver.experimental.enableProjectDiagnostics': true,
     'typescript.npm': 'linkpm'
   };
+
+  // Only configure experimental project diagnostics if explicitly specified
+  if (options.enableDiagnostics !== undefined) {
+    desiredSettings['typescript.tsserver.experimental.enableProjectDiagnostics'] = options.enableDiagnostics;
+  }
 
   let settingsChanged = false;
   for (const [key, value] of Object.entries(desiredSettings)) {

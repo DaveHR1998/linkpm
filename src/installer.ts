@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import pc from 'picocolors';
-import { resolvePackage, downloadTarball, type ResolvedPackage, type ResolveOptions } from './registry.js';
+import semver from 'semver';
+import { resolvePackage, downloadTarball, parsePackageSpec, type ResolvedPackage, type ResolveOptions } from './registry.js';
 import {
   isPackageInStore,
   extractToStore,
@@ -31,7 +32,7 @@ import {
 import { findPreset } from './presets.js';
 import { LinkPMError } from './utils/errors.js';
 import { registerAICapabilities, removeAICapabilityFromConfigs } from './ai/index.js';
-import { getLinkerMode, type LinkerMode } from './config/npmrc.js';
+import { getLinkerMode, loadNpmrc, type LinkerMode } from './config/npmrc.js';
 
 export interface InstallOptions extends ResolveOptions {
   dev?: boolean;
@@ -39,10 +40,28 @@ export interface InstallOptions extends ResolveOptions {
   noPrune?: boolean;
   ignoreScripts?: boolean;
   allowAllScripts?: boolean;
+  allowExoticTransitive?: boolean;
   ai?: boolean;
   yes?: boolean;
   interactive?: boolean;
   linker?: LinkerMode;
+  /** Save exact versions to package.json instead of ^ ranges (add --exact). */
+  exact?: boolean;
+  /** Whether installed packages are written back into package.json (default true for `add`). */
+  writeToPackageJson?: boolean;
+  /** Whether the resolved graph is persisted into linkpm-lock.json (default true). */
+  persistLockfile?: boolean;
+}
+
+/** A fully-pinned dependency entry destined for linkpm-lock.json. */
+export interface LockedEntry {
+  name: string;
+  version: string;
+  tarballUrl: string;
+  integrity?: string;
+  isDev?: boolean;
+  /** Exact resolved depName -> pinned version (not ranges). */
+  dependencies?: Record<string, string>;
 }
 
 export interface InstallResult {
@@ -55,7 +74,37 @@ export interface InstallResult {
   binsLinked: string[];
   depsCount?: number;
   dependencies?: Record<string, string>;
+  resolvedDependencies?: Record<string, string>;
+  declaredSpec?: string;
+  lockedTransitives?: LockedEntry[];
   aiCapabilities?: { servers: string[]; skills: string[] };
+}
+
+const EXOTIC_SPEC_TYPES = new Set(['file', 'link', 'git', 'tarball']);
+
+function classifyExoticRange(range: string): string | null {
+  const r = (range || '').trim();
+  if (r.startsWith('file:')) return 'file';
+  if (r.startsWith('link:')) return 'link';
+  if (r.startsWith('git+') || r.startsWith('git://') || r.startsWith('github:')) return 'git';
+  if (/^https?:\/\/\S+\.(tgz|tar\.gz)(\?\S*)?$/i.test(r) || r.endsWith('.tgz') || r.endsWith('.tar.gz')) return 'tarball';
+  return null;
+}
+
+/** Classify a raw dep spec for the exotic-transitive supply-chain guard. */
+function parsePackageSpecForGuard(spec: string): { type: string; exotic: boolean } {
+  try {
+    const parsed = parsePackageSpec(spec);
+    let type = parsed.type || 'registry';
+    // "name@git+https://..." parses as registry with an exotic-looking range
+    if (type === 'registry') {
+      const exoticRangeType = classifyExoticRange(parsed.range);
+      if (exoticRangeType) type = exoticRangeType;
+    }
+    return { type, exotic: EXOTIC_SPEC_TYPES.has(type) };
+  } catch {
+    return { type: 'registry', exotic: false };
+  }
 }
 
 export function isMatchingPlatform(pkgName: string): boolean {
@@ -84,9 +133,37 @@ export async function ensurePackageInStore(
   spec: string,
   options: InstallOptions = {},
   visited: Set<string> = new Set()
-): Promise<{ resolved: ResolvedPackage; storeDir: string; virtualLinkPath?: string; fromStore: boolean; depsLinked: number; transitiveDeps?: HoistDependencyItem[] }> {
+): Promise<{
+  resolved: ResolvedPackage;
+  storeDir: string;
+  virtualLinkPath?: string;
+  fromStore: boolean;
+  depsLinked: number;
+  transitiveDeps?: HoistDependencyItem[];
+  resolvedDependencies?: Record<string, string>;
+  lockedTransitives?: LockedEntry[];
+}> {
   const projectRoot = options.projectRoot || process.cwd();
   const overrides = options.overrides || getProjectOverrides(projectRoot);
+
+  // Supply-chain guard: transitive dependencies may not silently pull code
+  // from raw git URLs, tarballs, or local paths unless explicitly opted-in
+  // (--allow-exotic-transitive or allow-exotic-transitive=true in .npmrc).
+  const isTransitive = visited.size > 0;
+  if (isTransitive) {
+    const allowExotic = options.allowExoticTransitive ?? loadNpmrc(projectRoot).allowExoticTransitive;
+    const preParsed = parsePackageSpecForGuard(spec);
+    if (preParsed.exotic && !allowExotic) {
+      throw new LinkPMError(
+        `Security violation: Transitive exotic dependency "${spec}" (type: ${preParsed.type}) blocked by default`,
+        {
+          code: 'ERR_STORE_CORRUPTION',
+          hint: 'Transitive git, tarball, and local path dependencies pose supply-chain risks. Pass --allow-exotic-transitive or set allow-exotic-transitive=true in .npmrc to permit them.'
+        }
+      );
+    }
+  }
+
   const resolved = await resolvePackage(spec, { ...options, overrides, projectRoot });
 
   // Handle local path dependency (file: or link:) directly
@@ -132,6 +209,7 @@ export async function ensurePackageInStore(
   }
 
   let depsLinked = 0;
+  const optionalNames = new Set<string>();
   const depsToProcess: Array<{ name: string; range: string }> = [];
 
   if (resolved.dependencies) {
@@ -143,13 +221,16 @@ export async function ensurePackageInStore(
   if (resolved.optionalDependencies) {
     for (const [optName, optRange] of Object.entries(resolved.optionalDependencies)) {
       if (isMatchingPlatform(optName)) {
+        optionalNames.add(optName);
         depsToProcess.push({ name: optName, range: optRange });
       }
     }
   }
 
   const resolvedDeps: Record<string, string> = {};
+  const resolvedDepsExact: Record<string, string> = {};
   const transitiveDeps: HoistDependencyItem[] = [];
+  const lockedTransitives: LockedEntry[] = [];
 
   // Batch process dependencies into virtual store
   const BATCH_SIZE = 5;
@@ -167,18 +248,35 @@ export async function ensurePackageInStore(
 
           const depResult = await ensurePackageInStore(`${dep.name}@${dep.range}`, { ...options, ai: false }, nextVisited);
           resolvedDeps[dep.name] = (depResult as any).virtualLinkPath || depResult.storeDir;
+          resolvedDepsExact[dep.name] = depResult.resolved.version;
           transitiveDeps.push({
-            name: depResult.resolved.name,
+            name: depResult.resolved.installName || depResult.resolved.name,
             version: depResult.resolved.version,
             storeDir: depResult.storeDir,
             parentName: resolved.name
           });
+          lockedTransitives.push({
+            name: depResult.resolved.installName || depResult.resolved.name,
+            version: depResult.resolved.version,
+            tarballUrl: depResult.resolved.tarballUrl,
+            integrity: depResult.resolved.integrity,
+            dependencies: depResult.resolvedDependencies && Object.keys(depResult.resolvedDependencies).length > 0
+              ? depResult.resolvedDependencies
+              : undefined
+          });
           if (Array.isArray((depResult as any).transitiveDeps)) {
             transitiveDeps.push(...(depResult as any).transitiveDeps);
           }
+          if (Array.isArray(depResult.lockedTransitives)) {
+            lockedTransitives.push(...depResult.lockedTransitives);
+          }
           depsLinked++;
-        } catch {
-          // ignore non-critical optional dependency failures
+        } catch (depErr: any) {
+          if (optionalNames.has(dep.name)) {
+            // Optional transitivity failures (platform-mismatched binaries etc.) are non-fatal
+            return;
+          }
+          throw depErr;
         }
       })
     );
@@ -226,7 +324,9 @@ export async function ensurePackageInStore(
     virtualLinkPath: virtualRes.packageLinkPath,
     fromStore: alreadyInStore,
     depsLinked,
-    transitiveDeps
+    transitiveDeps,
+    resolvedDependencies: resolvedDepsExact,
+    lockedTransitives
   };
 }
 
@@ -244,12 +344,13 @@ export async function installSinglePackage(
     linker: linkerMode
   };
 
-  const { resolved, storeDir, virtualLinkPath, fromStore, depsLinked, transitiveDeps } = await ensurePackageInStore(spec, opts) as any;
+  const { resolved, storeDir, virtualLinkPath, fromStore, depsLinked, transitiveDeps, resolvedDependencies, lockedTransitives } = await ensurePackageInStore(spec, opts) as any;
+  const installName = resolved.installName || resolved.name;
 
   // Link top-level package into project's node_modules/ (real dir in hoisted mode, junction in junction mode)
   const linkRes = linkPackage(
     projectRoot,
-    resolved.name,
+    installName,
     linkerMode === 'hoisted' ? storeDir : (virtualLinkPath || storeDir),
     { linker: linkerMode }
   );
@@ -282,7 +383,7 @@ export async function installSinglePackage(
   }
 
   return {
-    name: resolved.name,
+    name: installName,
     version: resolved.version,
     tarballUrl: resolved.tarballUrl,
     integrity: resolved.integrity,
@@ -291,6 +392,9 @@ export async function installSinglePackage(
     binsLinked: linkRes.binsLinked,
     depsCount: depsLinked,
     dependencies: resolved.dependencies,
+    resolvedDependencies,
+    declaredSpec: spec,
+    lockedTransitives,
     aiCapabilities
   };
 }
@@ -336,24 +440,50 @@ export async function installPackages(
     }
   }
 
-  // Update package.json
-  addDependenciesToPackageJson(
-    projectRoot,
-    results.map(r => ({ name: r.name, version: r.version, isDev: r.isDev }))
-  );
+  // Update package.json — only for `add`-style flows. `linkpm install` and
+  // `linkpm ci` pass writeToPackageJson: false so declared ranges are never
+  // silently rewritten (e.g. "~1.2.3", "workspace:*", file:, npm: aliases).
+  if (options.writeToPackageJson !== false) {
+    addDependenciesToPackageJson(
+      projectRoot,
+      results.map(r => ({ name: r.name, version: r.version, isDev: r.isDev, declaredSpec: r.declaredSpec })),
+      { saveExact: Boolean(options.exact) }
+    );
+  }
 
-  // Update linkpm-lock.json
-  updateLockfile(
-    projectRoot,
-    results.map(r => ({
-      name: r.name,
-      version: r.version,
-      tarballUrl: r.tarballUrl,
-      integrity: r.integrity,
-      isDev: r.isDev,
-      dependencies: r.dependencies
-    }))
-  );
+  // Update linkpm-lock.json with the FULL resolved graph: top-level entries
+  // plus every pinned transitive package (exact versions + integrity), so
+  // `linkpm ci` is reproducible and offline-friendly.
+  if (options.persistLockfile !== false) {
+    const lockedEntries: LockedEntry[] = [];
+    for (const r of results) {
+      lockedEntries.push({
+        name: r.name,
+        version: r.version,
+        tarballUrl: r.tarballUrl,
+        integrity: r.integrity,
+        isDev: r.isDev,
+        dependencies: r.resolvedDependencies
+      });
+      if (Array.isArray(r.lockedTransitives)) {
+        for (const t of r.lockedTransitives) {
+          lockedEntries.push({ ...t, isDev: r.isDev });
+        }
+      }
+    }
+
+    updateLockfile(
+      projectRoot,
+      lockedEntries.map(e => ({
+        name: e.name,
+        version: e.version,
+        tarballUrl: e.tarballUrl,
+        integrity: e.integrity,
+        isDev: e.isDev,
+        dependencies: e.dependencies
+      }))
+    );
+  }
 
   return results;
 }
@@ -512,7 +642,11 @@ export async function installProjectDependencies(
     return installFromLockfile(projectRoot, installOpts);
   }
 
-  const depSpecs = Object.entries(deps).map(([name, ver]) => `${name}@${ver}`);
+  const optionalDeps = pkg.optionalDependencies || {};
+  const depSpecs = [
+    ...Object.entries(deps).map(([name, ver]) => `${name}@${ver}`),
+    ...Object.entries(optionalDeps).map(([name, ver]) => `${name}@${ver}`)
+  ];
   const devDepSpecs = Object.entries(devDeps).map(([name, ver]) => `${name}@${ver}`);
 
   if (depSpecs.length === 0 && devDepSpecs.length === 0) {
@@ -524,13 +658,13 @@ export async function installProjectDependencies(
 
   if (depSpecs.length > 0) {
     console.log(pc.bold('\nInstalling dependencies:'));
-    const res = await installPackages(depSpecs, projectRoot, { ...installOpts, dev: false });
+    const res = await installPackages(depSpecs, projectRoot, { ...installOpts, dev: false, writeToPackageJson: false });
     allResults.push(...res);
   }
 
   if (devDepSpecs.length > 0) {
     console.log(pc.bold('\nInstalling devDependencies:'));
-    const res = await installPackages(devDepSpecs, projectRoot, { ...installOpts, dev: true });
+    const res = await installPackages(devDepSpecs, projectRoot, { ...installOpts, dev: true, writeToPackageJson: false });
     allResults.push(...res);
   }
 
@@ -575,10 +709,61 @@ export async function installFromLockfile(
     return [];
   }
 
-  console.log(pc.bold(pc.blue('⚡ linkpm ci:')) + pc.dim(` Installing ${entries.length} locked packages...`));
+  // ci installs ONLY the direct dependencies from package.json, each pinned to
+  // the exact version recorded in the lockfile. Transitive packages are
+  // resolved from the same lockfile during recursive install (useLockfile
+  // preference), keeping ci deterministic, read-only and offline-capable.
+  const pkg = readPackageJson(projectRoot);
+  const directNames = [
+    ...Object.keys(pkg.dependencies || {}),
+    ...Object.keys(pkg.optionalDependencies || {})
+  ];
+  const directDevNames = Object.keys(pkg.devDependencies || {});
 
-  const specs = entries.map(([key]) => key);
-  const results = await installPackages(specs, projectRoot, installOpts);
+  const findPinnedVersion = (name: string): string | null => {
+    let best: string | null = null;
+    for (const [key, info] of entries) {
+      const atIdx = key.lastIndexOf('@');
+      if (atIdx <= 0 || key.slice(0, atIdx) !== name) continue;
+      if (semver.valid(info.version) && (!best || semver.gt(info.version, best))) {
+        best = info.version;
+      }
+    }
+    return best;
+  };
+
+  const prodSpecs: string[] = [];
+  for (const name of directNames) {
+    const pinned = findPinnedVersion(name);
+    if (pinned) prodSpecs.push(`${name}@${pinned}`);
+  }
+  const devSpecs: string[] = [];
+  for (const name of directDevNames) {
+    const pinned = findPinnedVersion(name);
+    if (pinned) devSpecs.push(`${name}@${pinned}`);
+  }
+
+  if (prodSpecs.length === 0 && devSpecs.length === 0) {
+    console.log(pc.yellow(`${LOCKFILE_NAME} has ${entries.length} pinned package(s), but none match package.json dependencies.`));
+    return [];
+  }
+
+  console.log(pc.bold(pc.blue('⚡ linkpm ci:')) + pc.dim(` Installing ${prodSpecs.length + devSpecs.length} direct packages (${entries.length} locked total, transitive included)...`));
+
+  // ci never mutates package.json or the lockfile.
+  const ciBase: InstallOptions = {
+    ...installOpts,
+    preferOffline: true,
+    writeToPackageJson: false,
+    persistLockfile: false
+  };
+  const results: InstallResult[] = [];
+  if (prodSpecs.length > 0) {
+    results.push(...await installPackages(prodSpecs, projectRoot, { ...ciBase, dev: false }));
+  }
+  if (devSpecs.length > 0) {
+    results.push(...await installPackages(devSpecs, projectRoot, { ...ciBase, dev: true }));
+  }
 
   const shouldPruneCi = !options.noPrune && (options as any).prune !== false;
   if (shouldPruneCi) {

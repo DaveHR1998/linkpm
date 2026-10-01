@@ -43,6 +43,8 @@ export interface RegistryClientOptions {
   preferOffline?: boolean;
   maxRetries?: number;
   timeoutMs?: number;
+  /** Request the full packument (includes per-version publish times) instead of abbreviated metadata. */
+  fullMetadata?: boolean;
 }
 
 export class RegistryClient {
@@ -50,11 +52,13 @@ export class RegistryClient {
   private memoryCache: Map<string, PackageManifest> = new Map();
   private maxRetries: number;
   private timeoutMs: number;
+  private fullMetadata: boolean;
 
   constructor(options: RegistryClientOptions = {}) {
     this.npmrc = loadNpmrc(options.projectRoot);
     this.maxRetries = options.maxRetries ?? 3;
     this.timeoutMs = options.timeoutMs ?? 15000;
+    this.fullMetadata = Boolean(options.fullMetadata);
   }
 
   public async getPackageManifest(
@@ -94,7 +98,7 @@ export class RegistryClient {
     const authHeader = getAuthHeaderForRegistry(registryUrl, this.npmrc);
 
     const headers: Record<string, string> = {
-      Accept: 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*'
+      Accept: this.getAcceptHeader()
     };
     if (authHeader) {
       headers['Authorization'] = authHeader;
@@ -192,9 +196,16 @@ export class RegistryClient {
     return manifest;
   }
 
+  private getAcceptHeader(): string {
+    return this.fullMetadata
+      ? 'application/json'
+      : 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*';
+  }
+
   private getDiskCachePath(packageName: string): string {
     const safeName = safePackageName(packageName);
-    return path.join(METADATA_CACHE_DIR, `${safeName}.json`);
+    const suffix = this.fullMetadata ? '.full.json' : '.json';
+    return path.join(METADATA_CACHE_DIR, `${safeName}${suffix}`);
   }
 
   private readDiskCache(packageName: string): PackageManifest | null {

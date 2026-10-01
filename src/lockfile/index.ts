@@ -149,11 +149,15 @@ export function updateLockfile(
 
   for (const entry of entries) {
     const key = `${entry.name}@${entry.version}`;
+    const prior = existing.packages[key];
+    // A package reachable from production must never be marked dev-only
+    // (mirrors npm hoisting semantics for shared transitive deps).
+    const isDev = prior && prior.isDev === false ? false : entry.isDev;
     existing.packages[key] = {
       version: entry.version,
-      resolved: entry.tarballUrl,
-      integrity: entry.integrity,
-      isDev: entry.isDev,
+      resolved: entry.tarballUrl || prior?.resolved || '',
+      integrity: entry.integrity || prior?.integrity,
+      isDev,
       dependencies: entry.dependencies
     };
   }

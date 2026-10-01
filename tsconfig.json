@@ -10,7 +10,12 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "resolveJsonModule": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ],
+    "preserveSymlinks": true
   },
-  "include": ["src/**/*"]
+  "include": [
+    "src/**/*"
+  ]
 }

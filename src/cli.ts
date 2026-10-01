@@ -103,8 +103,11 @@ cli
   .option('--prefer-offline', 'Prefer cached packages in store if available')
   .option('--linker <mode>', 'Linker mode: junction (zero-copy default) or hoisted (flat node_modules for React Native)')
   .option('--ai', 'Enable automatic AI capability discovery (MCP servers, agent skills)')
+  .option('--ignore-release-age', 'Bypass minimum release age cooldown for urgent hotfixes')
+  .option('--allow-exotic-transitive', 'Allow transitive git, tarball, and local path dependencies')
+  .option('-E, --exact', 'Save exact versions instead of ^ ranges')
   .option('-y, --yes', 'Automatically confirm prompts without interactive questions')
-  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; linker?: LinkerMode; ai?: boolean; yes?: boolean }) => {
+  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; linker?: LinkerMode; ai?: boolean; yes?: boolean; exact?: boolean; ignoreReleaseAge?: boolean; allowExoticTransitive?: boolean }) => {
     const projectRoot = findProjectRoot();
 
     // If --preset was passed
@@ -236,7 +239,7 @@ cli
 
     console.log(pc.bold(pc.blue('⚡ linkpm update:')) + pc.dim(` Refreshing ${targetPackages.length} package(s) against registry...\n`));
     const specs = targetPackages.map(p => `${p}@latest`);
-    await installPackages(specs, projectRoot, { preferOffline: false });
+    await installPackages(specs, projectRoot, { preferOffline: false, useLockfile: false });
     console.log(pc.green('\n✨ Done! All packages updated to latest versions.'));
   });
 
@@ -839,10 +842,14 @@ cli
   .alias('ide')
   .alias('vscode')
   .option('--plugin', 'Enable experimental linkpm-ts-plugin in tsconfig.json')
-  .action(async (options: { plugin?: boolean }) => {
+  .option('--diagnostics', 'Enable experimental background project diagnostics in VS Code')
+  .action(async (options: { plugin?: boolean; diagnostics?: boolean }) => {
     const projectRoot = findProjectRoot();
     console.log(pc.bold(pc.blue('⚡ linkpm ide-init:')) + ` Optimizing IDE & TypeScript Language Server settings...`);
-    const res = initIdeConfig(projectRoot, { enablePlugin: options.plugin });
+    const res = initIdeConfig(projectRoot, {
+      enablePlugin: options.plugin,
+      enableDiagnostics: options.diagnostics
+    });
     console.log(pc.bold(pc.green(`\n✔ ${res.message}`)));
     console.log(`  VS Code Settings: ${pc.cyan(res.vscodePath)}`);
     console.log(`  TypeScript SDK:   ${pc.green('mapped (node_modules/typescript/lib)')}`);

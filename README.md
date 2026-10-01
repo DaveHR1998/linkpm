@@ -34,16 +34,17 @@ LinkPM is engineered for modern JavaScript and TypeScript development, deliverin
 | **Storage Architecture** | Central content store (`~/.linkpm/store`) + Project Virtual Store (`node_modules/.linkpm/`) |
 | **Disk Linking Primitives** | Native NTFS Directory Junctions on Windows (no admin rights needed); Directory symlinks on POSIX |
 | **Store Security** | Recursive read-only filesystem attributes (`0o444`) with safe writable unlinking |
-| **Patch Management** | Isolated SHA-256 content-hashed store variants (`<version>_patch_<hash>`) |
+| **Patch Management** | Isolated SHA-256 content-hashed store variants (`<version>_patch_<hash>`); binary-safe patches with context verification |
 | **Garbage Collection** | Project tracking with 30-day retention grace period for unmounted drives and recent packages |
 | **Install Reliability** | Atomic 2-phase directory linking transactions with automatic rollback on linking errors |
-| **Dependency Resolution** | Deterministic breadth-first DAG resolver with cycle detection and platform filtering |
+| **Dependency Resolution** | Deterministic breadth-first DAG resolver with cycle detection and platform filtering; installs prefer lockfile-pinned versions |
 | **Peer Dependencies** | Explicit peer dependency conflict diagnosis and optional peer support |
-| **Lockfile Engine** | Version 2 deterministic format with sorted keys and strict CI frozen verification |
-| **Monorepo Workspaces** | Native `pnpm-workspace.yaml` parsing, topological execution runner, and workspace catalogs |
+| **Lockfile Engine** | Version 2 format pinning the **full resolved graph** (top-level + transitive) with exact versions & integrity; strict CI frozen verification; `linkpm ci` never rewrites `package.json` or the lockfile |
+| **Registry Config** | Full `.npmrc` support on the real install path: custom registries, scoped registries, mirrors, and auth tokens |
+| **Monorepo Workspaces** | Native `pnpm-workspace.yaml` parsing, `workspace:*` linking during install, topological execution runner, and workspace catalogs |
 | **Binary Execution** | Triple-shim generation (POSIX shell, Windows CMD, PowerShell) with `--preserve-symlinks` routing |
 | **Scaffolding & Presets** | Built-in presets, custom stack persistence (`~/.linkpm/presets.json`), and instant project creation |
-| **Diagnostics & Health** | Environment health and diagnostics (`linkpm doctor`), dependency tree, and audit scanning |
+| **Diagnostics & Health** | Environment health and diagnostics (`linkpm doctor`), dependency tree, and **real vulnerability auditing** against the npm advisory database (OSV fallback) |
 | **AI & Agent Tooling** | Native MCP server discovery, Agent Skills linking, and multi-IDE auto-wiring (.cursor, mcp_config.json) |
 
 ---
@@ -90,8 +91,11 @@ linkpm deploy --out dist-deploy
 linkpm deploy --out dist-lambda --prod
 
 # Automatic Lockfile Mirroring:
-# linkpm install / add automatically writes both linkpm-lock.json AND standard
-# package-lock.json (v3) for instant zero-config Vercel, Netlify, Render, and Dependabot support!
+# linkpm install / add automatically writes both linkpm-lock.json AND a
+# package-lock.json (v3) metadata mirror with resolved versions and integrity
+# hashes, so tools like Dependabot and Snyk can read pinned dependency data.
+# Note: the mirror is a metadata companion for scanners/deploy pipelines, not a
+# byte-identical npm tree — LinkPM's own layout uses the central store.
 
 # Remove dependencies and clean node_modules links
 linkpm remove lodash axios
@@ -248,7 +252,7 @@ linkpm store clear
 
 ---
 
-### 6. Stack Presets & Project Scaffolding
+### 7. Stack Presets & Project Scaffolding
 
 ```bash
 # Scaffold a full starter project with live UI and instant linked dependencies:
@@ -274,7 +278,7 @@ linkpm preset list
 
 ---
 
-### 7. Diagnostics, IDE Setup & Auditing
+### 8. Diagnostics, IDE Setup & Auditing
 
 ```bash
 # Validate Node.js version, NTFS junction capability, store health, and IDE LSP setup
@@ -293,14 +297,15 @@ linkpm why lodash
 # Check which installed packages have newer versions available
 linkpm outdated
 
-# Run vulnerability scan across installed dependencies (text, JSON, or SARIF for GitHub Security)
+# Run a real vulnerability scan (npm bulk advisory API, OSV fallback) across the
+# pinned lockfile (text, JSON, or SARIF for GitHub Code Scanning)
 linkpm audit
 linkpm audit --format sarif -o audit.sarif
 ```
 
 ---
 
-### 8. AI Capability Discovery & Agent Tooling (MCP & Skills)
+### 9. AI Capability Discovery & Agent Tooling (MCP & Skills)
 
 LinkPM provides optional, security-hardened management for **Model Context Protocol (MCP)** servers and **Agent Skills** directly within the package lifecycle:
 
@@ -368,8 +373,10 @@ Running MCP servers allows AI IDEs to execute local processes with user privileg
 ### Security & Integrity Highlights
 
 - **Default-Deny Lifecycle Scripts**: Package `install` and `postinstall` scripts are blocked by default. Scripts only run if allow-listed in `onlyBuiltDependencies` or approved via `linkpm approve-builds`.
-- **Release-Age Cooldown (`minimumReleaseAge`)**: Defaults to a 24-hour waiting window (`86400`s) for newly published package versions to protect against day-zero account takeovers. Urgent hotfixes can bypass via `--ignore-release-age`.
-- **Exotic Transitive Dependency Blocking**: Transitive dependencies requiring raw git URLs, tarballs, or local paths are blocked by default. Git dependencies pin exact commit SHAs.
+- **Release-Age Cooldown (`minimumReleaseAge`)**: Enforced during every install. Defaults to a 24-hour waiting window (`86400`s) for newly published package versions to protect against day-zero account takeovers. Urgent hotfixes can bypass via `--ignore-release-age`; dist-tags and ranges resolve to the newest *cooldown-safe* version automatically.
+- **Exotic Transitive Dependency Blocking**: Enforced during every install. Transitive dependencies requiring raw git URLs, tarballs, or local paths are blocked by default. Bypass per-run with `--allow-exotic-transitive`. (Resolution of direct `git:` dependencies pins the exact commit SHA in the dependency graph; fetching git repos during install is not yet supported.)
+- **Real Vulnerability Auditing**: `linkpm audit` queries the official npm bulk advisory API for every pinned package@version in the lockfile (falling back to OSV.dev), matching installed versions against each advisory's vulnerable range — never a canned list.
+- **Private Registry & Auth Support**: The full install path honors `.npmrc`: custom registries, per-scope registries, mirrors, `_authToken` credentials, and auth header stripping on cross-host redirects.
 - **Store Integrity Re-Check (`linkpm store verify [--fix]`)**: Verifies stored files against stored SHA-512 hashes and automatically recovers corrupted packages from registry tarballs.
 - **Scoped Native Module Build Isolation**: Packages requiring native C/C++ builds are keyed by Node ABI, OS platform, and CPU architecture (`_abi<modules>_<platform>_<arch>`), preventing multi-Node version collisions.
 - **Cross-Process Concurrency Locks**: Atomic PID and timestamp-backed file locking (`FileLock`) prevents race conditions between parallel LinkPM processes.
@@ -398,7 +405,7 @@ Because packages link to the central store and virtual store topology without re
 ## ⚠️ Roadmap & Planned Enhancements
 
 - **File-Level Deduplication**: Store deduplication currently operates at the version directory boundary. Content-addressable storage (CAS) with hardlink deduplication across disparate patch versions is under active development.
-- **Hoisted Linker Mode**: Certain tooling frameworks (such as React Native / Metro bundler and Electron packagers) expect a flat, hoisted `node_modules` layout. A configurable `node-linker = hoisted` mode is planned for these specialized toolchains.
+- **Git Dependency Installation**: `git:` specs are pinned to exact commit SHAs during resolution; direct repository fetching during install is planned.
 - **CLI Shell Autocompletion**: Tab autocompletion for Bash, Zsh, and Fish.
 
 ---

@@ -158,8 +158,31 @@ export async function commitPatch(editDir: string, projectRootOverride?: string)
   };
 }
 
+/** Heuristic binary detector: NUL byte in the first 8 KiB => binary. */
+export function isBinaryBuffer(buf: Buffer): boolean {
+  const len = Math.min(buf.length, 8192);
+  for (let i = 0; i < len; i++) {
+    if (buf[i] === 0x00) return true;
+  }
+  return false;
+}
+
+function emitBinaryPatchBlock(posixRel: string, isNew: boolean, buf: Buffer): string[] {
+  const chunks: string[] = [`diff --git a/${posixRel} b/${posixRel}`];
+  if (isNew) chunks.push(`new file mode 100644`);
+  const sha = crypto.createHash('sha256').update(buf).digest('hex');
+  chunks.push(`binary linkpm-base64 sha256:${sha}`);
+  const b64 = buf.toString('base64');
+  for (let i = 0; i < b64.length; i += 76) {
+    chunks.push(`>${b64.slice(i, i + 76)}`);
+  }
+  return chunks;
+}
+
 /**
  * Creates a unified diff between two directories.
+ * Binary files are emitted as self-verifying base64 blocks so patches never
+ * corrupt non-text assets (images, .node native modules, wasm, ...).
  */
 export function createUnifiedDiff(originalDir: string, modifiedDir: string): string {
   const diffChunks: string[] = [];
@@ -182,7 +205,12 @@ export function createUnifiedDiff(originalDir: string, modifiedDir: string): str
 
     if (!origExists && modExists) {
       // New file
-      const modContent = fs.readFileSync(modPath, 'utf-8');
+      const modBuf = fs.readFileSync(modPath);
+      if (isBinaryBuffer(modBuf)) {
+        diffChunks.push(...emitBinaryPatchBlock(posixRel, true, modBuf));
+        continue;
+      }
+      const modContent = modBuf.toString('utf-8');
       const lines = modContent.split(/\r?\n/);
       diffChunks.push(`diff --git a/${posixRel} b/${posixRel}`);
       diffChunks.push(`new file mode 100644`);
@@ -193,27 +221,35 @@ export function createUnifiedDiff(originalDir: string, modifiedDir: string): str
         diffChunks.push(`+${line}`);
       }
     } else if (origExists && !modExists) {
-      // Deleted file
-      const origContent = fs.readFileSync(origPath, 'utf-8');
-      const lines = origContent.split(/\r?\n/);
+      // Deleted file (content not needed for binary; record plain delete for text)
+      const origBuf = fs.readFileSync(origPath);
       diffChunks.push(`diff --git a/${posixRel} b/${posixRel}`);
       diffChunks.push(`deleted file mode 100644`);
       diffChunks.push(`--- a/${posixRel}`);
       diffChunks.push(`+++ /dev/null`);
-      diffChunks.push(`@@ -1,${lines.length} +0,0 @@`);
-      for (const line of lines) {
-        diffChunks.push(`-${line}`);
+      if (!isBinaryBuffer(origBuf)) {
+        const origContent = origBuf.toString('utf-8');
+        const lines = origContent.split(/\r?\n/);
+        diffChunks.push(`@@ -1,${lines.length} +0,0 @@`);
+        for (const line of lines) {
+          diffChunks.push(`-${line}`);
+        }
       }
     } else if (origExists && modExists) {
       // Modified file
-      const origContent = fs.readFileSync(origPath, 'utf-8');
-      const modContent = fs.readFileSync(modPath, 'utf-8');
+      const origBuf = fs.readFileSync(origPath);
+      const modBuf = fs.readFileSync(modPath);
 
-      if (origContent !== modContent) {
-        const fileDiff = computeLineDiff(origContent, modContent, posixRel);
-        if (fileDiff) {
-          diffChunks.push(fileDiff);
-        }
+      if (origBuf.equals(modBuf)) continue;
+
+      if (isBinaryBuffer(origBuf) || isBinaryBuffer(modBuf)) {
+        diffChunks.push(...emitBinaryPatchBlock(posixRel, false, modBuf));
+        continue;
+      }
+
+      const fileDiff = computeLineDiff(origBuf.toString('utf-8'), modBuf.toString('utf-8'), posixRel);
+      if (fileDiff) {
+        diffChunks.push(fileDiff);
       }
     }
   }
@@ -267,10 +303,13 @@ interface FilePatchHunk {
 export function applyPatchToDirectory(targetDir: string, patchContent: string): void {
   const lines = patchContent.split(/\r?\n/);
   let currentFile: string | null = null;
+  let pendingFile: string | null = null;
   let isNew = false;
   let isDelete = false;
   let currentHunks: FilePatchHunk[] = [];
   let currentHunk: FilePatchHunk | null = null;
+  let currentBinarySha: string | null = null;
+  let binaryLines: string[] = [];
 
   const flushFile = () => {
     if (!currentFile) return;
@@ -290,6 +329,22 @@ export function applyPatchToDirectory(targetDir: string, patchContent: string): 
       throw new LinkPMError(`Security violation: Patch path "${currentFile}" escapes target directory`, {
         code: 'ERR_STORE_CORRUPTION'
       });
+    }
+
+    // Binary payload: verify sha256 then write bytes as-is
+    if (currentBinarySha) {
+      const buf = Buffer.from(binaryLines.join(''), 'base64');
+      const actualSha = crypto.createHash('sha256').update(buf).digest('hex');
+      if (actualSha !== currentBinarySha) {
+        throw new LinkPMError(`Binary patch checksum mismatch for "${currentFile}"`, {
+          code: 'ERR_STORE_CORRUPTION',
+          hint: 'The binary payload inside the .patch file is corrupted or was tampered with.'
+        });
+      }
+      const parent = path.dirname(dest);
+      if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
+      fs.writeFileSync(dest, buf);
+      return;
     }
 
     if (isDelete) {
@@ -318,6 +373,16 @@ export function applyPatchToDirectory(targetDir: string, patchContent: string): 
       let newResult: string[] = [];
       let origIdx = 0;
 
+      const contextMismatch = (lineType: string, expected: string, hunk: FilePatchHunk) => {
+        throw new LinkPMError(
+          `Patch context mismatch in "${currentFile}" at original line ${origIdx + 1} (hunk @@ -${hunk.origStart},${hunk.origCount} @@): expected ${lineType} "${expected}", found "${orig[origIdx] ?? '(end of file)'}"`,
+          {
+            code: 'ERR_COMMAND_FAILED',
+            hint: 'The patch was generated against a different version of this file. Re-create the patch or resolve the mismatch manually.'
+          }
+        );
+      };
+
       for (const hunk of currentHunks) {
         const targetStart = Math.max(0, hunk.origStart - 1);
         while (origIdx < targetStart && origIdx < orig.length) {
@@ -326,12 +391,20 @@ export function applyPatchToDirectory(targetDir: string, patchContent: string): 
 
         for (const line of hunk.lines) {
           if (line.startsWith(' ')) {
-            newResult.push(orig[origIdx] !== undefined ? orig[origIdx] : line.slice(1));
+            const expected = line.slice(1);
+            if (orig[origIdx] === undefined || orig[origIdx] !== expected) {
+              contextMismatch('context line', expected, hunk);
+            }
+            newResult.push(orig[origIdx]);
+            origIdx++;
+          } else if (line.startsWith('-')) {
+            const expected = line.slice(1);
+            if (orig[origIdx] === undefined || orig[origIdx] !== expected) {
+              contextMismatch('removed line', expected, hunk);
+            }
             origIdx++;
           } else if (line.startsWith('+')) {
             newResult.push(line.slice(1));
-          } else if (line.startsWith('-')) {
-            origIdx++;
           }
         }
       }
@@ -358,13 +431,23 @@ export function applyPatchToDirectory(targetDir: string, patchContent: string): 
       isDelete = false;
       currentHunks = [];
       currentHunk = null;
+      currentBinarySha = null;
+      binaryLines = [];
+      // "diff --git a/<path> b/<path>" gives the target path directly
+      const m = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+      pendingFile = m ? m[2].trim() : null;
+      currentFile = pendingFile;
     } else if (line.startsWith('new file mode')) {
       isNew = true;
     } else if (line.startsWith('deleted file mode')) {
       isDelete = true;
+    } else if (line.startsWith('binary linkpm-base64 sha256:')) {
+      currentBinarySha = line.slice('binary linkpm-base64 sha256:'.length).trim();
+    } else if (currentBinarySha && line.startsWith('>')) {
+      binaryLines.push(line.slice(1));
     } else if (line.startsWith('+++ b/')) {
       currentFile = line.slice(6).trim();
-    } else if (line.startsWith('--- a/') && !currentFile) {
+    } else if (line.startsWith('--- a/') && (!currentFile || currentFile === pendingFile)) {
       currentFile = line.slice(6).trim();
     } else if (line.startsWith('@@')) {
       // Hunk header: @@ -origStart,origCount +newStart,newCount @@

@@ -1,0 +1,6 @@
+{
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.preferences.includePackageJsonAutoImports": "auto",
+  "typescript.npm": "linkpm",
+  "typescript.tsserver.experimental.enableProjectDiagnostics": true
+}

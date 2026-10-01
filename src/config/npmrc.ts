@@ -260,16 +260,16 @@ export function getAuthHeaderForRegistry(registryUrl: string, npmrc: NpmrcConfig
   try {
     const urlObj = new URL(registryUrl);
     const host = urlObj.host;
+    const hostWithPath = `${host}${urlObj.pathname}`.replace(/\/+$/, '');
 
-    // Check direct host match e.g. registry.npmjs.org
-    if (npmrc.authTokens[host]) {
-      return `Bearer ${npmrc.authTokens[host]}`;
-    }
-
-    // Check host with pathname e.g. registry.npmjs.org/
-    const hostWithPath = `${host}${urlObj.pathname}`.replace(/\/$/, '');
-    if (npmrc.authTokens[hostWithPath]) {
-      return `Bearer ${npmrc.authTokens[hostWithPath]}`;
+    // npmrc keys look like "//registry.npmjs.org/:_authToken=..." and were
+    // stored with trailing slashes intact in some formats — normalize both
+    // sides before comparing so standard npm-written keys always match.
+    for (const [key, token] of Object.entries(npmrc.authTokens)) {
+      const normalizedKey = key.replace(/\/+$/, '');
+      if (normalizedKey === host || normalizedKey === hostWithPath) {
+        return `Bearer ${token}`;
+      }
     }
   } catch {}
 

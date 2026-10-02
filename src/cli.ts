@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { cac } from 'cac';
 import pc from 'picocolors';
-import { ensureDirectories, getStoreDir, setStoreDir } from './config/index.js';
+import { ensureDirectories, getStoreDir, setStoreDir, LINKPM_HOME, GLOBAL_BIN_DIR } from './config/index.js';
 import { findProjectRoot, writePackageJson, readPackageJson } from './package-json.js';
 import {
   installPackages,
@@ -38,6 +39,9 @@ import {
 import { deployProject } from './deploy.js';
 import { initMetroConfig } from './metro/index.js';
 import { initIdeConfig } from './ide/index.js';
+import { printInstalledList } from './diagnostics/list.js';
+import { installGlobalPackages, printGlobalPathInstructions } from './global.js';
+import { scheduleUpdateNotice } from './updater.js';
 import type { LinkerMode } from './config/npmrc.js';
 
 const cli = cac('linkpm');
@@ -106,8 +110,26 @@ cli
   .option('--ignore-release-age', 'Bypass minimum release age cooldown for urgent hotfixes')
   .option('--allow-exotic-transitive', 'Allow transitive git, tarball, and local path dependencies')
   .option('-E, --exact', 'Save exact versions instead of ^ ranges')
+  .option('-g, --global', 'Install package(s) globally into the shared linkpm global root')
   .option('-y, --yes', 'Automatically confirm prompts without interactive questions')
-  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; linker?: LinkerMode; ai?: boolean; yes?: boolean; exact?: boolean; ignoreReleaseAge?: boolean; allowExoticTransitive?: boolean }) => {
+  .action(async (packages: string[], options: { dev?: boolean; preset?: string; offline?: boolean; preferOffline?: boolean; linker?: LinkerMode; ai?: boolean; yes?: boolean; exact?: boolean; global?: boolean; ignoreReleaseAge?: boolean; allowExoticTransitive?: boolean }) => {
+    // Global install (pnpm add -g parity) — does not touch the project
+    if (options.global) {
+      if (!packages || packages.length === 0) {
+        console.log(pc.yellow('Please specify at least one package to install globally.'));
+        console.log(pc.dim('Example: linkpm add -g typescript tsx'));
+        return;
+      }
+      console.log(pc.bold(pc.blue('⚡ linkpm')) + pc.dim(` installing globally: ${packages.join(', ')}`));
+      const res = await installGlobalPackages(packages, options);
+      for (const r of res.results) {
+        console.log(`  ${pc.bold(pc.green('✔'))} ${pc.bold(r.name)}${pc.dim(`@${r.version}`)}`);
+      }
+      console.log(pc.green('\n✨ Done! Packages installed to the linkpm global root.'));
+      printGlobalPathInstructions(res.binDir, res.binsCopied);
+      return;
+    }
+
     const projectRoot = findProjectRoot();
 
     // If --preset was passed
@@ -147,22 +169,35 @@ cli
   .command('remove [...packages]', 'Remove packages from current project')
   .alias('rm')
   .alias('uninstall')
-  .action(async (packages: string[]) => {
+  .option('-g, --global', 'Remove package(s) from the linkpm global root')
+  .action(async (packages: string[], options: { global?: boolean }) => {
     if (!packages || packages.length === 0) {
       console.log(pc.yellow('Please specify at least one package to remove.'));
       console.log(pc.dim('Example: linkpm remove lodash axios'));
       return;
     }
 
-    const projectRoot = findProjectRoot();
+    const projectRoot = options.global
+      ? path.join(LINKPM_HOME, 'global')
+      : findProjectRoot();
     console.log(pc.bold(pc.blue('⚡ linkpm remove:')) + pc.dim(` Removing packages from ${projectRoot}\n`));
     await uninstallPackages(packages, projectRoot);
+    if (options.global) {
+      // Also drop any copied global bin shims
+      for (const name of packages) {
+        for (const suffix of ['', '.cmd', '.ps1']) {
+          try { fs.rmSync(path.join(GLOBAL_BIN_DIR, `${name.startsWith('@') ? name.split('/')[1] : name}${suffix}`), { force: true }); } catch {}
+        }
+      }
+    }
   });
 
 // 4. INSTALL / I COMMAND
 cli
-  .command('install', 'Install all dependencies from package.json')
+  .command('install [...packages]', 'Install all dependencies from package.json, or add specific packages (alias of linkpm add)')
   .alias('i')
+  .option('-D, --dev', 'Save packages as devDependencies (only when adding specific packages)')
+  .option('--prod', 'Install only production dependencies (skip devDependencies)')
   .option('--offline', 'Force offline mode (use only cached packages)')
   .option('--prefer-offline', 'Prefer cached packages in store if available')
   .option('--linker <mode>', 'Linker mode: junction (zero-copy default) or hoisted (flat node_modules for React Native)')
@@ -173,7 +208,9 @@ cli
   .option('--allow-build-scripts', 'Allow all package build scripts without supply-chain restrictions')
   .option('--ignore-release-age', 'Bypass minimum release age cooldown for urgent hotfixes')
   .option('--allow-exotic-transitive', 'Allow transitive git, tarball, and local path dependencies')
-  .action(async (options: {
+  .action(async (packages: string[], options: {
+    dev?: boolean;
+    prod?: boolean;
     offline?: boolean;
     preferOffline?: boolean;
     linker?: LinkerMode;
@@ -186,8 +223,17 @@ cli
     allowExoticTransitive?: boolean;
   }) => {
     const projectRoot = findProjectRoot();
+
+    // `linkpm install <pkg>` behaves like `linkpm add <pkg>` (pnpm parity)
+    if (packages && packages.length > 0) {
+      console.log(pc.bold(pc.blue('⚡ linkpm')) + pc.dim(` working in ${projectRoot}`));
+      await installPackages(packages, projectRoot, { ...options, dev: Boolean(options.dev) });
+      console.log(pc.green('\n✨ Done! All packages linked, package.json and linkpm-lock.json updated.'));
+      return;
+    }
+
     const isFrozen = Boolean(options.frozen || options.frozenLockfile || (process.env.CI && options.frozenLockfile !== false && options.frozen !== false));
-    console.log(pc.bold(pc.blue('⚡ linkpm')) + pc.dim(` installing dependencies in ${projectRoot}${isFrozen ? ' (frozen mode)' : ''}`));
+    console.log(pc.bold(pc.blue('⚡ linkpm')) + pc.dim(` installing dependencies in ${projectRoot}${isFrozen ? ' (frozen mode)' : ''}${options.prod ? ' (production only)' : ''}`));
     await installProjectDependencies(projectRoot, { ...options, frozenLockfile: isFrozen });
     console.log(pc.green('\n✨ Done! All dependencies linked from central store.'));
   });
@@ -196,6 +242,7 @@ cli
 cli
   .command('ci', 'Install exact locked dependencies from linkpm-lock.json')
   .option('--offline', 'Force offline mode')
+  .option('--prod', 'Install only production dependencies (skip devDependencies)')
   .option('--linker <mode>', 'Linker mode: junction (zero-copy default) or hoisted (flat node_modules for React Native)')
   .option('--frozen', 'Strictly verify lockfile against package.json')
   .option('--frozen-lockfile', 'Strictly verify lockfile against package.json')
@@ -203,6 +250,7 @@ cli
   .option('--ignore-scripts', 'Do not run package install/postinstall lifecycle scripts')
   .action(async (options: {
     offline?: boolean;
+    prod?: boolean;
     linker?: LinkerMode;
     frozen?: boolean;
     frozenLockfile?: boolean;
@@ -313,12 +361,13 @@ cli
 
 // 8. STORE COMMANDS
 cli
-  .command('store [action]', 'Manage central store (list, status, gc, clear, path)')
+  .command('store [action]', 'Manage central store (list, status, gc, prune, clear, path)')
   .option('--dry-run', 'Simulate garbage collection without deleting any files')
   .option('--days <number>', 'Retention grace period in days (default: 30)')
   .option('--force, --all', 'Bypass grace period and prune all unreferenced packages immediately')
   .action(async (action: string = 'list', options: { dryRun?: boolean; days?: string | number; force?: boolean; all?: boolean }) => {
-    const act = action.toLowerCase();
+    // 'prune' is an alias for 'gc' (pnpm store prune parity)
+    const act = action.toLowerCase() === 'prune' ? 'gc' : action.toLowerCase();
 
     if (act === 'path') {
       console.log(getStoreDir());
@@ -573,6 +622,21 @@ cli
     }
   });
 
+// 15b. DEV / BUILD SCRIPT SHORTHANDS (pnpm parity)
+for (const scriptName of ['dev', 'build'] as const) {
+  cli
+    .command(`${scriptName} [...args]`, `Run the ${scriptName} script from package.json`)
+    .action(async (args: string[] = []) => {
+      const projectRoot = findProjectRoot();
+      const res = await runScript(projectRoot, scriptName, {
+        extraArgs: Array.isArray(args) ? args : []
+      });
+      if (!res.success) {
+        process.exit(res.exitCode);
+      }
+    });
+}
+
 // 16. EXEC COMMAND
 cli
   .command('exec <command> [...args]', 'Run a shell command within the project node_modules/.bin context')
@@ -646,6 +710,15 @@ cli
     console.log(pc.dim('Checking for outdated dependencies...'));
     const outdated = await checkOutdated(projectRoot);
     printOutdatedTable(outdated);
+  });
+
+// 19b. LIST / LS COMMAND (pnpm parity)
+cli
+  .command('list', 'List installed top-level packages and their resolved versions')
+  .alias('ls')
+  .action(async () => {
+    const projectRoot = findProjectRoot();
+    printInstalledList(projectRoot);
   });
 
 // 20. AUDIT COMMAND
@@ -836,6 +909,25 @@ cli
     }
   });
 
+// 27b. SELF-UPDATE COMMAND
+cli
+  .command('self-update', 'Update linkpm itself to the latest published version')
+  .action(async () => {
+    const current = getCliVersion();
+    console.log(pc.bold(pc.blue('⚡ linkpm self-update:')) + pc.dim(` current version ${current}`));
+    console.log(pc.dim('Fetching latest version from npm registry...'));
+
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const res = spawnSync(npmCmd, ['install', '-g', 'linkpm@latest'], { stdio: 'inherit' });
+    if (res.status === 0) {
+      console.log(pc.bold(pc.green('\n✔ linkpm updated successfully.')));
+      console.log(pc.dim('Restart your terminal (or re-run linkpm) to pick up the new version.\n'));
+    } else {
+      console.error(pc.red('\n✖ self-update failed. Try manually: npm i -g linkpm@latest\n'));
+      process.exit(res.status ?? 1);
+    }
+  });
+
 // 28. IDE-INIT COMMAND (VS CODE, CURSOR & TYPESCRIPT LANGUAGE SERVER LSP)
 cli
   .command('ide-init', 'Auto-configure VS Code, Cursor, and TypeScript LSP settings for zero-copy store junctions')
@@ -871,5 +963,8 @@ const getCliVersion = (): string => {
 
 cli.help();
 cli.version(getCliVersion());
+
+// git/npm-style update notifier: prints after the command completes (non-blocking)
+scheduleUpdateNotice(getCliVersion());
 
 cli.parse();

@@ -391,7 +391,7 @@ describe('Security & Production Reliability Tests', () => {
       }));
 
       // Register the project while the "drive is mounted"
-      registerProject(fakeExternalProj);
+      await registerProject(fakeExternalProj);
 
       // Verify it was saved with lockfile snapshot
       const recordsBefore = getRegisteredProjectRecords();

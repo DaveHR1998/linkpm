@@ -2,6 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseNpmrcContent, getRegistryForPackage, getAuthHeaderForRegistry, type NpmrcConfig } from '../src/config/npmrc.js';
 
+const emptyConfigExtras = {
+  cafile: undefined,
+  proxy: undefined,
+  httpsProxy: undefined,
+  storeDir: undefined,
+  linker: undefined,
+  minimumReleaseAge: 86400,
+  releaseAgeExclude: [] as string[],
+  allowExoticTransitive: false
+};
+
 test('parseNpmrcContent parses comments, keys, and values', () => {
   const content = `
     # This is a comment
@@ -27,7 +38,8 @@ test('getRegistryForPackage routes scoped packages correctly', () => {
     },
     authTokens: {},
     strictSsl: true,
-    raw: {}
+    raw: {},
+    ...emptyConfigExtras
   };
 
   assert.equal(getRegistryForPackage('react', npmrc), 'https://registry.npmjs.org/');
@@ -43,7 +55,8 @@ test('getAuthHeaderForRegistry extracts correct bearer token', () => {
       'registry.npmjs.org': 'my_token_abc'
     },
     strictSsl: true,
-    raw: {}
+    raw: {},
+    ...emptyConfigExtras
   };
 
   const header = getAuthHeaderForRegistry('https://registry.npmjs.org/', npmrc);

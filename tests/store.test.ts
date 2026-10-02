@@ -38,9 +38,9 @@ test('FileLock recovers from stale lock older than timeout', async () => {
   assert.equal(fs.existsSync(tmpLock), false);
 });
 
-test('registerProject persists project directory to projects.json', () => {
+test('registerProject persists project directory to projects.json (lock-merged, race-safe)', async () => {
   const fakeProject = path.join(os.tmpdir(), `linkpm-fake-project-${Date.now()}`);
-  registerProject(fakeProject);
+  await registerProject(fakeProject);
 
   const list = getRegisteredProjects();
   assert.ok(list.includes(path.resolve(fakeProject)));

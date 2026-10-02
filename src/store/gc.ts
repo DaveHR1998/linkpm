@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { LINKPM_HOME, getStoreDir, safePackageName } from '../config/index.js';
 import { LOCKFILE_NAME, readLockfile } from '../lockfile/index.js';
+import { FileLock } from './lock.js';
 
 export const PROJECTS_FILE = path.join(LINKPM_HOME, 'projects.json');
 export const DEFAULT_RETENTION_DAYS = 30;
@@ -31,33 +32,42 @@ export interface GCResult {
   retentionDays: number;
 }
 
-export function registerProject(projectRoot: string): void {
+/**
+ * Registers a project in the global projects.json — FileLock-guarded so
+ * concurrent linkpm processes (parallel installs, test suites) merge instead
+ * of clobbering each other's entries.
+ */
+export async function registerProject(projectRoot: string): Promise<void> {
   try {
-    const records = getRegisteredProjectRecords();
-    const resolved = path.resolve(projectRoot);
-    const existing = records.find(r => r.path === resolved);
+    await FileLock.withLock(`${PROJECTS_FILE}.lock`, async () => {
+      const records = getRegisteredProjectRecords();
+      const resolved = path.resolve(projectRoot);
+      const existing = records.find(r => r.path === resolved);
 
-    // Snapshot lockfile packages if lockfile exists
-    let lockfilePackages: string[] | undefined;
-    const lock = readLockfile(resolved);
-    if (lock) {
-      lockfilePackages = Object.keys(lock.packages);
-    }
-
-    if (existing) {
-      existing.lastSeen = Date.now();
-      if (lockfilePackages) {
-        existing.lockfilePackages = lockfilePackages;
+      // Snapshot lockfile packages if lockfile exists
+      let lockfilePackages: string[] | undefined;
+      const lock = readLockfile(resolved);
+      if (lock) {
+        lockfilePackages = Object.keys(lock.packages);
       }
-    } else {
-      records.push({
-        path: resolved,
-        lastSeen: Date.now(),
-        lockfilePackages
-      });
-    }
 
-    fs.writeFileSync(PROJECTS_FILE, JSON.stringify(records, null, 2), 'utf-8');
+      if (existing) {
+        existing.lastSeen = Date.now();
+        if (lockfilePackages) {
+          existing.lockfilePackages = lockfilePackages;
+        }
+      } else {
+        records.push({
+          path: resolved,
+          lastSeen: Date.now(),
+          lockfilePackages
+        });
+      }
+
+      const tempPath = `${PROJECTS_FILE}.writing-${process.pid}`;
+      fs.writeFileSync(tempPath, JSON.stringify(records, null, 2), 'utf-8');
+      fs.renameSync(tempPath, PROJECTS_FILE);
+    });
   } catch {}
 }
 

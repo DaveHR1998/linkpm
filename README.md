@@ -71,17 +71,27 @@ linkpm doctor
 linkpm install
 linkpm i
 
-# Add production dependencies
+# Production-only install (skip devDependencies) — pnpm --prod parity
+linkpm install --prod
+linkpm ci --prod
+
+# Add production dependencies (install <pkg> works too)
 linkpm add express cors dotenv
+linkpm install express          # alias of linkpm add
 
 # Add development dependencies
 linkpm add -D typescript @types/node tsx
+
+# Install packages globally (pnpm add -g parity, bins staged in ~/.linkpm/bin)
+linkpm add -g typescript tsx
+linkpm remove -g tsx            # removes global package and its bin shims
 
 # Fast offline-first installs (using local central store)
 linkpm add react --prefer-offline
 linkpm add react --offline
 
-# Strict CI install from linkpm-lock.json (fails if lockfile is out of sync)
+# Strict CI install from linkpm-lock.json (fails if lockfile is out of sync,
+# never rewrites package.json or the lockfile)
 linkpm ci
 linkpm install --frozen
 linkpm install --frozen-lockfile
@@ -200,9 +210,15 @@ linkpm run build
 linkpm run test -- --watch
 linkpm run lint --if-present
 
-# Direct script aliases
+# Direct script aliases (pnpm parity: linkpm dev / build work without 'run')
 linkpm test
 linkpm start
+linkpm dev
+linkpm build
+
+# List installed top-level packages with resolved versions
+linkpm list
+linkpm ls
 
 # Run an executable installed in local node_modules/.bin context
 linkpm exec tsc --noEmit
@@ -229,6 +245,7 @@ linkpm store path
 
 # Garbage collect unreferenced packages (with 30-day retention grace period)
 linkpm store gc
+linkpm store prune        # alias of store gc (pnpm store prune parity)
 
 # Dry-run garbage collection to preview what would be pruned
 linkpm store gc --dry-run
@@ -373,7 +390,9 @@ Running MCP servers allows AI IDEs to execute local processes with user privileg
 ### Security & Integrity Highlights
 
 - **Default-Deny Lifecycle Scripts**: Package `install` and `postinstall` scripts are blocked by default. Scripts only run if allow-listed in `onlyBuiltDependencies` or approved via `linkpm approve-builds`.
-- **Release-Age Cooldown (`minimumReleaseAge`)**: Enforced during every install. Defaults to a 24-hour waiting window (`86400`s) for newly published package versions to protect against day-zero account takeovers. Urgent hotfixes can bypass via `--ignore-release-age`; dist-tags and ranges resolve to the newest *cooldown-safe* version automatically.
+- **Release-Age Cooldown (`minimumReleaseAge`)**: Enforced during every install. Defaults to a 24-hour waiting window (`86400`s) for newly published package versions to protect against day-zero account takeovers. Ranges and dist-tags like `latest` automatically fall back to the newest *cooldown-safe* release with a visible warning; exact pins of fresh versions error with a bypass hint (`--ignore-release-age` or `release-age-exclude` in `.npmrc`).
+- **Update Notifier & Self-Update**: LinkPM checks the registry in the background (at most every 6h, never delays a command) and notifies you after a command completes when a newer LinkPM exists. Upgrade with `linkpm self-update` or `npm i -g linkpm@latest`. Disable with `LINKPM_NO_UPDATE_CHECK=1`.
+- **Resilient Presets**: If a single package in a preset fails to resolve, LinkPM installs everything else (dependencies and devDependencies alike), summarizes the failures, and exits non-zero — a scaffold never ends up half-dead because one registry entry misbehaved.
 - **Exotic Transitive Dependency Blocking**: Enforced during every install. Transitive dependencies requiring raw git URLs, tarballs, or local paths are blocked by default. Bypass per-run with `--allow-exotic-transitive`. (Resolution of direct `git:` dependencies pins the exact commit SHA in the dependency graph; fetching git repos during install is not yet supported.)
 - **Real Vulnerability Auditing**: `linkpm audit` queries the official npm bulk advisory API for every pinned package@version in the lockfile (falling back to OSV.dev), matching installed versions against each advisory's vulnerable range — never a canned list.
 - **Private Registry & Auth Support**: The full install path honors `.npmrc`: custom registries, per-scope registries, mirrors, `_authToken` credentials, and auth header stripping on cross-host redirects.

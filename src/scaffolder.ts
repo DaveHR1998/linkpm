@@ -33,7 +33,7 @@ export async function scaffoldProject(templateInput: string, projectNameInput?: 
   console.log(pc.bold(pc.green('\n🎉 Project scaffolded and dependencies linked successfully!')));
   console.log(pc.bold('\nTo start developing:'));
   console.log(pc.cyan(`  cd ${projectName}`));
-  console.log(pc.cyan(`  npm run dev\n`));
+  console.log(pc.cyan(`  linkpm dev\n`));
 }
 
 import { fileURLToPath } from 'node:url';
@@ -286,6 +286,9 @@ button:focus-visible {
 }
 `;
   fs.writeFileSync(path.join(srcDir, 'index.css'), indexCss, 'utf-8');
+
+  // 7b. src/vite-env.d.ts (required by TS6+ for side-effect CSS/asset imports)
+  fs.writeFileSync(path.join(srcDir, 'vite-env.d.ts'), '/// <reference types="vite/client" />\n', 'utf-8');
 
   // 8. src/main.tsx
   const mainTsx = `import React from 'react';

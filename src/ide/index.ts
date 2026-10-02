@@ -53,24 +53,39 @@ export function initIdeConfig(
     vscodeCreated = true;
   }
 
+  const originalSettingsJson = JSON.stringify(settings);
+
+  // Pin typescript.tsdk only when the workspace TypeScript actually ships the
+  // classic language server. TypeScript 7 (tsgo) has no lib/tsserver.js — a
+  // tsdk pin pointing there leaves the editor with NO language server and
+  // misleading red import/type errors. In presets the scaffolded template
+  // already installs typescript, so we must check first.
+  const workspaceTsDK = path.join(projectRoot, 'node_modules', 'typescript', 'lib');
+  const hasTsserver = fs.existsSync(path.join(workspaceTsDK, 'tsserver.js'));
+  const hasTsgo = !hasTsserver && fs.existsSync(path.join(workspaceTsDK, 'tsc.js'));
+
   const desiredSettings: Record<string, any> = {
-    'typescript.tsdk': 'node_modules/typescript/lib',
     'typescript.preferences.includePackageJsonAutoImports': 'auto',
     'typescript.npm': 'linkpm'
   };
 
-  // Only configure experimental project diagnostics if explicitly specified
-  if (options.enableDiagnostics !== undefined) {
-    desiredSettings['typescript.tsserver.experimental.enableProjectDiagnostics'] = options.enableDiagnostics;
+  if (!hasTsgo) {
+    desiredSettings['typescript.tsdk'] = 'node_modules/typescript/lib';
   }
 
-  let settingsChanged = false;
   for (const [key, value] of Object.entries(desiredSettings)) {
     if (settings[key] !== value) {
       settings[key] = value;
-      settingsChanged = true;
     }
   }
+
+  // Repair previously written, now-harmful pins if tsgo is detected
+  if (hasTsgo && 'typescript.tsdk' in settings) {
+    delete settings['typescript.tsdk'];
+  }
+
+  // Compare final state against original to decide whether to write
+  const settingsChanged = JSON.stringify(settings) !== originalSettingsJson;
 
   if (settingsChanged || vscodeCreated) {
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');

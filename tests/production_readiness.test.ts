@@ -197,6 +197,65 @@ describe('Deterministic & Secure Resolution (production fixes)', () => {
     assert.equal(matchVersionWithCooldown('demo', '^2.0.0', manifest, { minimumReleaseAgeSec: 86400, releaseAgeExclude: ['demo'] }), '2.0.0');
     assert.equal(matchVersionWithCooldown('demo', '^2.0.0', manifest, { minimumReleaseAgeSec: 86400, ignoreReleaseAge: true }), '2.0.0');
   });
+
+  it('regression: @latest falls back to the newest cooldown-safe release instead of erroring', async () => {
+    // Mirrors the lucide-react failure: newest release published < 24h ago,
+    // a previous release is older than the cooldown window.
+    const oldRelease = new Date(Date.now() - 7 * 86400000).toISOString();
+    const manifest: any = {
+      name: 'demo',
+      'dist-tags': { latest: '1.50.0', beta: '1.51.0-beta.1' },
+      versions: {
+        '1.49.2': { name: 'demo', version: '1.49.2', dist: { tarball: 'http://x/x.tgz' } },
+        '1.50.0': { name: 'demo', version: '1.50.0', dist: { tarball: 'http://x/x.tgz' } },
+        '1.51.0-beta.1': { name: 'demo', version: '1.51.0-beta.1', dist: { tarball: 'http://x/x.tgz' } }
+      },
+      time: {
+        '1.49.2': oldRelease,
+        '1.50.0': new Date(Date.now() - 3600000).toISOString(),   // 1h old -> blocked
+        '1.51.0-beta.1': oldRelease                                // prerelease published a week ago
+      }
+    };
+
+    // Tag @latest blocked -> falls back to 1.49.2 (no throw!)
+    assert.equal(matchVersionWithCooldown('demo', 'latest', manifest, { minimumReleaseAgeSec: 86400 }), '1.49.2');
+    // Bare range '*' behaves the same
+    assert.equal(matchVersionWithCooldown('demo', '*', manifest, { minimumReleaseAgeSec: 86400 }), '1.49.2');
+    // A caret range touching the fresh release falls back too
+    assert.equal(matchVersionWithCooldown('demo', '^1.45.0', manifest, { minimumReleaseAgeSec: 86400 }), '1.49.2');
+    // Exact pin of the fresh version still hard-errors (security intent)
+    assert.throws(
+      () => matchVersionWithCooldown('demo', '1.50.0', manifest, { minimumReleaseAgeSec: 86400 }),
+      (err: any) => err instanceof LinkPMError && err.message.includes('Security Cooldown')
+    );
+  });
+
+  it('integration: resolvePackage("name@latest") resolves the cooldown-safe version via a mock registry', async () => {
+    const root = tmpdir('tagfallback');
+    const pkgName = `tagfb-${RUN}`;
+    const oldTgz = await makePackageTarball({ 'index.js': 'x', 'package.json': JSON.stringify({ name: pkgName, version: '1.49.2' }) }, path.join(root, 'old.tgz'));
+    const freshTgz = await makePackageTarball({ 'index.js': 'x', 'package.json': JSON.stringify({ name: pkgName, version: '1.50.0' }) }, path.join(root, 'fresh.tgz'));
+    const server = await startMockRegistry([{
+      name: pkgName,
+      versions: { '1.49.2': { tarball: oldTgz }, '1.50.0': { tarball: freshTgz } },
+      publishTimes: {
+        '1.49.2': new Date(Date.now() - 7 * 86400000).toISOString(),
+        '1.50.0': new Date().toISOString()
+      }
+    }]);
+
+    const projectRoot = path.join(root, 'proj');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    writeNpmrc(projectRoot, server.url, server.port);
+
+    try {
+      const resolved = await resolvePackage(`${pkgName}@latest`, { projectRoot, useLockfile: false });
+      assert.equal(resolved.version, '1.49.2', 'must fall back to the newest cooldown-safe release');
+    } finally {
+      await server.close();
+      cleanup(root);
+    }
+  });
 });
 
 /* ------------------------------------------------------------------ */

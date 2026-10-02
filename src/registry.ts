@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import semver from 'semver';
+import pc from 'picocolors';
 import { TARBALLS_DIR, getStoreDir, safePackageName, loadNpmrc } from './config.js';
 import { parsePackageSpec as parseFullSpec } from './resolver/spec.js';
 import { findWorkspaceRoot, resolveCatalogDependency } from './workspaces/config.js';
@@ -119,6 +120,18 @@ function resolveFromLockfile(
  * day-zero supply-chain attacks. Bypassed with --ignore-release-age or
  * release-age-exclude entries.
  */
+function ageHours(manifest: PackageManifest, version: string): string {
+  const pubTime = manifest.time?.[version];
+  return pubTime ? ((Date.now() - new Date(pubTime).getTime()) / 3600000).toFixed(1) : 'unknown';
+}
+
+function printCooldownFallback(name: string, requestedRange: string, blockedVersion: string, fallbackVersion: string, manifest: PackageManifest): void {
+  console.warn(
+    pc.yellow(`  ⚠ Security cooldown: ${pc.bold(`${name}@${blockedVersion}`)} was published ${ageHours(manifest, blockedVersion)}h ago (< 24h). Installing cooldown-safe ${pc.bold(`${name}@${fallbackVersion}`)} instead.`) +
+    pc.dim(`\n    To install the fresh version, pass --ignore-release-age or add "${name}" to release-age-exclude in .npmrc.`)
+  );
+}
+
 export function matchVersionWithCooldown(
   name: string,
   range: string,
@@ -146,17 +159,12 @@ export function matchVersionWithCooldown(
       })
     : versions;
 
-  const distTagHit = manifest['dist-tags']?.[range];
-  if (distTagHit && cooldownSafe.includes(distTagHit)) {
-    return distTagHit;
-  }
-
+  // 1. Exact version pin — must exist and be cooldown-safe, otherwise error
+  // (the user asked for these exact bytes, which had zero soak time).
   if (semver.valid(range) && versions.includes(range)) {
     if (!cooldownSafe.includes(range)) {
-      const pubTime = manifest.time?.[range];
-      const ageHours = pubTime ? ((Date.now() - new Date(pubTime).getTime()) / 3600000).toFixed(1) : 'unknown';
       throw new LinkPMError(
-        `Security Cooldown: "${name}@${range}" was published ${ageHours}h ago (minimum release age: ${(minAgeMs / 3600000).toFixed(0)}h)`,
+        `Security Cooldown: "${name}@${range}" was published ${ageHours(manifest, range)}h ago (minimum release age: ${(minAgeMs / 3600000).toFixed(0)}h)`,
         {
           code: 'ERR_VERSION_NOT_FOUND',
           packageName: name,
@@ -168,20 +176,45 @@ export function matchVersionWithCooldown(
     return range;
   }
 
-  const matched = semver.maxSatisfying(cooldownSafe, range, { includePrerelease: true });
-  if (matched) return matched;
+  const distTagHit = manifest['dist-tags']?.[range];
+  if (distTagHit && cooldownSafe.includes(distTagHit)) {
+    return distTagHit;
+  }
 
-  const unsafe = semver.maxSatisfying(versions, range, { includePrerelease: true });
+  // 2. Semver range ("^1.2.3") or dist-tag fallback ("latest"): pick the newest
+  // cooldown-safe satisfying version. Tags and wildcards degrade to '*', so
+  // "linkpm add foo@latest" on a 3-hours-old release resolves to the previous
+  // release instead of erroring (the lucide-react failure mode). Prereleases
+  // only match when the requester opted into them (npm semantics).
+  const wantedRange = semver.validRange(range);
+  const searchRange = wantedRange || '*';
+  const wantsPrerelease = Boolean(range.includes('-')) ||
+    Boolean(distTagHit && semver.prerelease(distTagHit));
+  const matched = semver.maxSatisfying(cooldownSafe, searchRange, { includePrerelease: wantsPrerelease });
+  if (matched) {
+    if (enforceCooldown) {
+      const freshestWanted = semver.maxSatisfying(versions, searchRange, { includePrerelease: wantsPrerelease });
+      const blockedTarget = distTagHit && !cooldownSafe.includes(distTagHit) ? distTagHit
+        : (freshestWanted && !cooldownSafe.includes(freshestWanted)) ? freshestWanted
+        : null;
+      if (blockedTarget && blockedTarget !== matched) {
+        printCooldownFallback(name, range, blockedTarget, matched, manifest);
+      }
+    }
+    return matched;
+  }
+
+  // 3. Nothing satisfies within the safe window: if a satisfying version exists
+  // but is only blocked by the cooldown, give a precise, actionable error.
+  const unsafe = semver.maxSatisfying(versions, searchRange, { includePrerelease: wantsPrerelease });
   if (unsafe && enforceCooldown && !cooldownSafe.includes(unsafe)) {
-    const pubTime = manifest.time?.[unsafe];
-    const ageHours = pubTime ? ((Date.now() - new Date(pubTime).getTime()) / 3600000).toFixed(1) : 'unknown';
     throw new LinkPMError(
-      `Security Cooldown: Latest satisfying version "${name}@${unsafe}" was published ${ageHours}h ago (minimum release age: ${(minAgeMs / 3600000).toFixed(0)}h)`,
+      `Security Cooldown: The only satisfying version "${name}@${unsafe}" was published ${ageHours(manifest, unsafe)}h ago (minimum release age: ${(minAgeMs / 3600000).toFixed(0)}h)`,
       {
         code: 'ERR_VERSION_NOT_FOUND',
         packageName: name,
         requestedVersion: range,
-        hint: `To install this release immediately, pass --ignore-release-age or add "${name}" to release-age-exclude in .npmrc.`
+        hint: `To install this release immediately, pass --ignore-release-age or add "${name}" to release-age-exclude in .npmrc, or lower minimum-release-age.`
       }
     );
   }
@@ -453,13 +486,49 @@ export async function resolvePackage(spec: string, options: ResolveOptions = {})
     const locked = resolveFromLockfile(options.projectRoot, name, range);
     if (locked) {
       const safeNameLocked = safePackageName(name);
+
+      // Lockfile-pinned local path dep (previously approved & recorded)
+      if (locked.resolved.startsWith('file://')) {
+        const localTarget = locked.resolved.slice('file://'.length);
+        return {
+          name,
+          installName,
+          version: locked.version,
+          tarballUrl: locked.resolved,
+          tarballPath: localTarget,
+          integrity: locked.integrity,
+          isLocal: true,
+          localPath: localTarget
+        };
+      }
+
+
+      // Hydrate dependency/peer metadata from the store copy so reinstalls
+      // (and ci) still link transitive and peer dependencies correctly — the
+      // lockfile entry alone has no peerDependencies/bin info.
+      let metadata: Partial<ResolvedPackage> = {};
+      const storePkgPath = path.join(getStoreDir(), safeNameLocked, locked.version, 'package.json');
+      if (fs.existsSync(storePkgPath)) {
+        try {
+          const pkgJson = JSON.parse(fs.readFileSync(storePkgPath, 'utf-8'));
+          metadata = {
+            bin: pkgJson.bin,
+            dependencies: pkgJson.dependencies,
+            devDependencies: pkgJson.devDependencies,
+            peerDependencies: pkgJson.peerDependencies,
+            optionalDependencies: pkgJson.optionalDependencies
+          };
+        } catch {}
+      }
+
       return {
         name,
         installName,
         version: locked.version,
         tarballUrl: locked.resolved,
         tarballPath: path.join(TARBALLS_DIR, `${safeNameLocked}-${locked.version}.tgz`),
-        integrity: locked.integrity
+        integrity: locked.integrity,
+        ...metadata
       };
     }
   }

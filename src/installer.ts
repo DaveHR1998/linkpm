@@ -51,6 +51,8 @@ export interface InstallOptions extends ResolveOptions {
   writeToPackageJson?: boolean;
   /** Whether the resolved graph is persisted into linkpm-lock.json (default true). */
   persistLockfile?: boolean;
+  /** Production-only install: skip devDependencies. */
+  prod?: boolean;
 }
 
 /** A fully-pinned dependency entry destined for linkpm-lock.json. */
@@ -282,6 +284,38 @@ export async function ensurePackageInStore(
     );
   }
 
+  // Peer dependencies: link PEERS into the package as well (pnpm virtual-store
+  // semantics). Plugins like @vitejs/plugin-react import their peer ("vite")
+  // from their own (possibly realpath'd) location — without this junction,
+  // ESM config loading fails with ERR_MODULE_NOT_FOUND.
+  if (resolved.peerDependencies) {
+    for (const peerName of Object.keys(resolved.peerDependencies)) {
+      if (resolvedDeps[peerName]) continue; // already resolved as a regular dep
+      const peerNm = path.join(projectRoot, 'node_modules', peerName);
+      if (fs.existsSync(peerNm)) {
+        try {
+          resolvedDeps[peerName] = fs.realpathSync(peerNm);
+        } catch {}
+      } else {
+        // Fallback: pin from the lockfile if the peer is recorded there
+        const lock = readLockfile(projectRoot);
+        if (lock?.packages) {
+          for (const [key] of Object.keys(lock.packages)) {
+            const atIdx = key.lastIndexOf('@');
+            if (atIdx > 0 && key.slice(0, atIdx) === peerName) {
+              const peerVer = lock.packages[key].version;
+              const peerStoreDir = getPackageStoreDir(peerName, peerVer);
+              if (isPackageInStore(peerName, peerVer)) {
+                resolvedDeps[peerName] = peerStoreDir;
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Link dependencies in store package directory so Node.js runtime resolution in backend apps (Express)
   // finds dependencies even when Windows kernel dereferences junctions to their realpath in ~/.linkpm/store
   if (Object.keys(resolvedDeps).length > 0) {
@@ -335,7 +369,7 @@ export async function installSinglePackage(
   projectRoot: string,
   options: InstallOptions = {}
 ): Promise<InstallResult> {
-  registerProject(projectRoot);
+  await registerProject(projectRoot);
   const linkerMode = options.linker || getLinkerMode(projectRoot);
   const opts: InstallOptions = {
     projectRoot,
@@ -404,7 +438,7 @@ export async function installPackages(
   projectRoot: string,
   options: InstallOptions = {}
 ): Promise<InstallResult[]> {
-  registerProject(projectRoot);
+  await registerProject(projectRoot);
   const results: InstallResult[] = [];
   const opts: InstallOptions = {
     projectRoot,
@@ -591,6 +625,24 @@ export function pruneExtraneousDependencies(projectRoot: string, linkerMode?: Li
   return pruned;
 }
 
+export interface PresetFailure {
+  spec: string;
+  error: string;
+}
+
+/**
+ * Error thrown when a preset finishes with partial failures. Successful
+ * packages remain installed and persisted — only the failures are reported.
+ */
+export class PresetPartialError extends Error {
+  failures: PresetFailure[];
+  constructor(presetName: string, failures: PresetFailure[]) {
+    super(`${failures.length} package(s) of preset "${presetName}" failed to install`);
+    this.name = 'PresetPartialError';
+    this.failures = failures;
+  }
+}
+
 export async function installPreset(
   presetInput: string,
   projectRoot: string,
@@ -604,17 +656,35 @@ export async function installPreset(
   console.log(`\n${pc.bold(pc.cyan('⚡ Applying preset:'))} ${pc.bold(preset.name)} ${pc.dim(preset.description || '')}`);
 
   const allResults: InstallResult[] = [];
+  const failures: PresetFailure[] = [];
 
-  if (preset.dependencies.length > 0) {
-    console.log(`\n${pc.bold('Dependencies:')}`);
-    const deps = await installPackages(preset.dependencies, projectRoot, { ...options, dev: false });
-    allResults.push(...deps);
-  }
+  // Continue-on-error: a single unresolvable package must not nuke the whole
+  // scaffold (e.g. a 2-hours-old release blocked by the release-age cooldown).
+  // Everything else — including devDependencies like vite — still installs,
+  // and failures are summarized at the end with a non-zero exit.
+  const runBatch = async (specs: string[], dev: boolean, label: string) => {
+    if (specs.length === 0) return;
+    console.log(`\n${pc.bold(label)}`);
+    for (const spec of specs) {
+      try {
+        const res = await installPackages([spec], projectRoot, { ...options, dev });
+        allResults.push(...res);
+      } catch (err: any) {
+        failures.push({ spec, error: err.message });
+      }
+    }
+  };
 
-  if (preset.devDependencies.length > 0) {
-    console.log(`\n${pc.bold('DevDependencies:')}`);
-    const devDeps = await installPackages(preset.devDependencies, projectRoot, { ...options, dev: true });
-    allResults.push(...devDeps);
+  await runBatch(preset.dependencies, false, 'Dependencies:');
+  await runBatch(preset.devDependencies, true, 'DevDependencies:');
+
+  if (failures.length > 0) {
+    console.log(pc.bold(pc.red(`\n✖ ${failures.length} package(s) of preset "${preset.name}" failed:`)));
+    for (const f of failures) {
+      console.log(`  ${pc.red('✖')} ${pc.bold(f.spec)}: ${pc.dim(f.error)}`);
+    }
+    console.log(pc.green(`  ${allResults.length} package(s) installed successfully. Fix the failures above and re-run "${pc.cyan(`linkpm use ${preset.name}`)}".\n`));
+    throw new PresetPartialError(preset.name, failures);
   }
 
   return allResults;
@@ -647,7 +717,8 @@ export async function installProjectDependencies(
     ...Object.entries(deps).map(([name, ver]) => `${name}@${ver}`),
     ...Object.entries(optionalDeps).map(([name, ver]) => `${name}@${ver}`)
   ];
-  const devDepSpecs = Object.entries(devDeps).map(([name, ver]) => `${name}@${ver}`);
+  // --prod installs exactly like pnpm --prod: devDependencies are skipped
+  const devDepSpecs = options.prod ? [] : Object.entries(devDeps).map(([name, ver]) => `${name}@${ver}`);
 
   if (depSpecs.length === 0 && devDepSpecs.length === 0) {
     console.log(pc.yellow('No dependencies found in package.json to install.'));
@@ -738,9 +809,11 @@ export async function installFromLockfile(
     if (pinned) prodSpecs.push(`${name}@${pinned}`);
   }
   const devSpecs: string[] = [];
-  for (const name of directDevNames) {
-    const pinned = findPinnedVersion(name);
-    if (pinned) devSpecs.push(`${name}@${pinned}`);
+  if (!installOpts.prod) {
+    for (const name of directDevNames) {
+      const pinned = findPinnedVersion(name);
+      if (pinned) devSpecs.push(`${name}@${pinned}`);
+    }
   }
 
   if (prodSpecs.length === 0 && devSpecs.length === 0) {
@@ -750,10 +823,12 @@ export async function installFromLockfile(
 
   console.log(pc.bold(pc.blue('⚡ linkpm ci:')) + pc.dim(` Installing ${prodSpecs.length + devSpecs.length} direct packages (${entries.length} locked total, transitive included)...`));
 
-  // ci never mutates package.json or the lockfile.
+  // ci never mutates package.json or the lockfile. Exotic transitive deps from
+  // the lockfile were approved when the lockfile was generated — ci trusts it.
   const ciBase: InstallOptions = {
     ...installOpts,
     preferOffline: true,
+    allowExoticTransitive: true,
     writeToPackageJson: false,
     persistLockfile: false
   };
